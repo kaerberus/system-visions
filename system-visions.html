@@ -241,7 +241,7 @@ function pickFills(nc, nr, count){
   return out;
 }
 
-function makeGridTexture(color, maxAniso, v, h, frameW){
+function makeGridTexture(maxAniso, v, h, frameW){
   const SC = TILE_K * TILE_P, SL = 1024, K = TILE_K, SR = K * 128;
   const mk = n => { const c = document.createElement('canvas'); c.width = c.height = n; return c; };
   const cellCv = mk(SC), tileCv = mk(SL), revCv = mk(SR);
@@ -271,7 +271,10 @@ function makeGridTexture(color, maxAniso, v, h, frameW){
       for (const [c, r] of fills){
         const x0 = (si + v[c]) * TILE_P, y0 = (sj + h[r]) * TILE_P;
         const w = (v[c + 1] - v[c]) * TILE_P, hh = (h[r + 1] - h[r]) * TILE_P;
-        cg.fillStyle = Math.random() < BLACK_CELL_CHANCE ? '#0e0e0e' : color;
+        // a mask, not a colour: white marks a palette fill, black the rare
+        // all-black cell. The shader mixes these against the layer's current
+        // palette colour, so recolouring never re-bakes this canvas.
+        cg.fillStyle = Math.random() < BLACK_CELL_CHANCE ? '#000' : '#fff';
         cg.fillRect(x0, y0, w, hh);
 
         // cell-local position, 0..1 across the cell, as a pair of gradients
@@ -324,7 +327,7 @@ function makeGridTexture(color, maxAniso, v, h, frameW){
   }
 
   const cell = new THREE.CanvasTexture(cellCv);
-  cell.colorSpace = THREE.SRGBColorSpace; cell.anisotropy = maxAniso;
+  cell.colorSpace = THREE.NoColorSpace; cell.anisotropy = maxAniso;
   cell.wrapS = cell.wrapT = THREE.RepeatWrapping;
 
   const line = new THREE.CanvasTexture(tileCv);
@@ -338,6 +341,151 @@ function makeGridTexture(color, maxAniso, v, h, frameW){
   reveal.magFilter = THREE.NearestFilter;
 
   return { cell, line, reveal };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Palette: three HSL slots, retuned by clicking cells in infinity mode
+ * ------------------------------------------------------------------ */
+
+// COLORS seeds the slots (nothing reads the raw hex list after boot). Slot 0
+// is the "mid" tone (Mondrian red), slot 1 the dark one (blue), slot 2 the
+// light one (yellow). Hues drift, but these tonal bands stay put, so every
+// palette keeps one dark, one mid and one light block whatever the user
+// wanders into.
+const PALETTE_TWEEN = 0.9;                    // seconds per palette crossfade
+const PALETTE_BANDS = [
+  { s: [0.65, 0.92], l: [0.40, 0.56] },
+  { s: [0.62, 0.92], l: [0.25, 0.41] },
+  { s: [0.78, 0.98], l: [0.46, 0.60] }
+];
+
+const prnd = (a, b) => a + Math.random() * (b - a);
+
+function hexToHsl(hex){
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (max !== min){
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r)      h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else                h = (r - g) / d + 4;
+    h *= 60;
+  }
+  return { h, s, l };
+}
+
+function hslToHex({ h, s, l }){
+  h = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r, g, b;
+  if      (h <  60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else              [r, g, b] = [c, 0, x];
+  const to = v => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return '#' + to(r) + to(g) + to(b);
+}
+
+const circDist = (a, b) => { const d = Math.abs(a - b) % 360; return Math.min(d, 360 - d); };
+
+// circular lerp: hues take the short way round, so a crossfade never sweeps
+// through the whole wheel
+function lerpHsl(a, b, t){
+  const d = ((b.h - a.h + 540) % 360) - 180;
+  return {
+    h: a.h + d * t,
+    s: a.s + (b.s - a.s) * t,
+    l: a.l + (b.l - a.l) * t
+  };
+}
+
+const paletteNow  = COLORS.map(hexToHsl);
+let   paletteFrom = paletteNow.map(c => ({ ...c }));
+let   paletteTo   = paletteNow.map(c => ({ ...c }));
+let   paletteT    = 1;                        // 1 = settled, 0 = tween started
+let   paletteHome = true;                     // false once the user has drifted
+
+// One replacement colour for `slot`, drifting around the clicked hue. The
+// sibling (30..70deg) still reads as "another blue"; the cousin (60..100deg,
+// with a 30% chance of a 90..150deg leap) is what lets successive clicks walk
+// the palette into a new family. Never lands within 18deg of the hue it
+// replaces, nor 25deg of an already-chosen neighbour.
+function driftedColor(slot, anchorHue, cousin, avoid){
+  const band = PALETTE_BANDS[slot];
+  const prev = paletteTo[slot].h;
+  let h = prev;
+  for (let i = 0; i < 40; i++){
+    const d = cousin
+      ? (Math.random() < 0.3 ? prnd(90, 150) : prnd(60, 100))
+      : prnd(30, 70);
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    h = (anchorHue + sign * d + prnd(-6, 6) + 360) % 360;
+    if (circDist(h, prev) < 18) continue;
+    if (avoid.some(a => circDist(h, a) < 25)) continue;
+    break;
+  }
+  return { h, s: prnd(band.s[0], band.s[1]), l: prnd(band.l[0], band.l[1]) };
+}
+
+// A click keeps the clicked slot exactly as it is and re-rolls the other two.
+function retunePalette(anchor){
+  const others = [0, 1, 2].filter(j => j !== anchor);
+  if (Math.random() < 0.5) others.reverse();
+  const [sib, cou] = others;
+  const next = paletteTo.map(c => ({ ...c }));
+  next[sib] = driftedColor(sib, paletteTo[anchor].h, false, []);
+  next[cou] = driftedColor(cou, paletteTo[anchor].h, true, [next[sib].h]);
+  paletteFrom = paletteNow.map(c => ({ ...c }));
+  paletteTo = next;
+  paletteT = 0;
+  paletteHome = false;
+}
+
+// Clicking the background (a point no plane draws) eases the palette back to
+// the Mondrian original. No-op once it is already home.
+function resetPalette(){
+  if (paletteHome) return;
+  paletteFrom = paletteNow.map(c => ({ ...c }));
+  paletteTo = COLORS.map(hexToHsl);
+  paletteT = 0;
+  paletteHome = true;
+}
+
+function applyTitlePalette(){
+  if (!TITLE.wedgeSlot || !TITLE.blobSlot) return;
+  TITLE.wedges.forEach((w, i) =>
+    w.setAttribute('fill', hslToHex(paletteNow[TITLE.wedgeSlot[i]])));
+  TITLE.blobs.forEach((b, i) => {
+    const hex = hslToHex(paletteNow[TITLE.blobSlot[i]]);
+    for (const stop of TITLE.grads[i].children) stop.setAttribute('stop-color', hex);
+  });
+}
+
+// Single sync point for everything the palette touches: the plane colours in
+// the shader, the title's wedges/blobs and the CSS button tints.
+function applyPalette(){
+  for (const pl of planes) pl.cellColor.value.setStyle(hslToHex(paletteNow[pl.slot]));
+  const css = document.documentElement.style;
+  css.setProperty('--red', hslToHex(paletteNow[0]));
+  css.setProperty('--blue', hslToHex(paletteNow[1]));
+  css.setProperty('--yellow', hslToHex(paletteNow[2]));
+  applyTitlePalette();
+}
+
+function paletteTick(dt){
+  if (paletteT >= 1) return;
+  paletteT = reduceMotion ? 1 : Math.min(1, paletteT + dt / PALETTE_TWEEN);
+  const e = paletteT * paletteT * (3 - 2 * paletteT);
+  for (let i = 0; i < 3; i++) paletteNow[i] = lerpHsl(paletteFrom[i], paletteTo[i], e);
+  applyPalette();
 }
 
 /* ------------------------------------------------------------------ *
@@ -393,15 +541,17 @@ const uCellUVS    = { value: new THREE.Vector2(1, 1) };
 const uCellUVO    = { value: new THREE.Vector2(0, 0) };
 const uLineUVS    = { value: new THREE.Vector2(1, 1) };
 const uLineUVO    = { value: new THREE.Vector2(0, 0) };
+const uInk        = { value: new THREE.Color('#0e0e0e') }; // line + black-cell ink
 
 const HALF = (SIZE / 2).toFixed(4);
 
 // One layered plane: a Lambert material patched to composite the cell texture,
 // the gridline texture and the radial infinity reveal. The per-plane maps live
 // in their own uniform objects; every other uniform is shared by all planes.
-function makePlane(){
+function makePlane(slot){
   const lineMap   = { value: null };
   const revealMap = { value: null };
+  const cellColor = { value: new THREE.Color(COLORS[slot]) }; // paletteNow[slot]
   const mat = new THREE.MeshLambertMaterial({
     alphaTest: 0.5, side: THREE.DoubleSide
   });
@@ -421,6 +571,8 @@ function makePlane(){
     shader.uniforms.uCellUVO    = uCellUVO;
     shader.uniforms.uLineUVS    = uLineUVS;
     shader.uniforms.uLineUVO    = uLineUVO;
+    shader.uniforms.uCellColor  = cellColor;
+    shader.uniforms.uInk        = uInk;
 
     shader.vertexShader = shader.vertexShader
       .replace('void main() {', 'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
@@ -431,6 +583,7 @@ function makePlane(){
         'uniform sampler2D uLineMap;\nuniform sampler2D uRevealMap;\n' +
         'uniform vec2 uCellUVS;\nuniform vec2 uCellUVO;\n' +
         'uniform vec2 uLineUVS;\nuniform vec2 uLineUVO;\n' +
+        'uniform vec3 uCellColor;\nuniform vec3 uInk;\n' +
         'uniform float uLineReveal;\nuniform float uCellReveal;\n' +
         'uniform float uLineDir;\nuniform float uS;\n' +
         'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\n' +
@@ -440,6 +593,8 @@ function makePlane(){
     vec2 uvC = vUv * uCellUVS + uCellUVO;
     vec2 uvL = vUv * uLineUVS + uLineUVO;
     vec4 cellT = texture2D(map, uvC);
+    // the cell map is a mask: white = palette fill, black = black cell
+    vec3 cellRGB = mix(uInk, uCellColor, cellT.r);
     vec4 lineT = texture2D(uLineMap, uvL);
     vec4 rev = texture2D(uRevealMap, uvC);
     // where this fragment sits inside its own cell (-1..1, clamped so a cell
@@ -469,18 +624,21 @@ function makePlane(){
     float covered = step(abs(local.x), grow) * step(abs(local.y), grow);
     float cellA = insideF > 0.5 ? 1.0 : covered * p;
     vec4 comp = vec4(lineT.rgb, lineT.a * lineA)
-              + vec4(cellT.rgb, cellT.a * cellA) * (1.0 - lineT.a * lineA);
+              + vec4(cellRGB, cellT.a * cellA) * (1.0 - lineT.a * lineA);
     diffuseColor = vec4(diffuse, opacity) * comp;
   }`);
   };
 
   const mesh = new THREE.Mesh(geo, mat);
   scene.add(mesh);
-  return { mesh, mat, lineMap, revealMap };
+  return { mesh, mat, lineMap, revealMap, cellColor };
 }
 
-const planes = COLORS.map((color, i) =>
-  Object.assign(makePlane(), { color, i, depth: i, pose: randomPose(i) }));
+const planes = [0, 1, 2].map(i => {
+  const pl = Object.assign(makePlane(i), { slot: i, i, depth: i, pose: randomPose(i) });
+  pl.mesh.userData.plane = pl;
+  return pl;
+});
 
 function randomPose(depth){
   const rand = (a, b) => a + Math.random() * (b - a);
@@ -643,6 +801,8 @@ const TITLE = {
   wedges: [1, 2, 3].map(i => document.getElementById('tg-w' + i)),
   blobs:  [1, 2, 3].map(i => document.getElementById('tg-b' + i)),
   grads:  [1, 2, 3].map(i => document.getElementById('tg-g' + i)),
+  wedgeSlot: null,
+  blobSlot:  null,
   fx: null
 };
 
@@ -657,14 +817,15 @@ function wedgePath(cx, cy, r, a0, a1){
 
 // a fresh palette gradient for each engagement of infinity mode
 function titleRandomize(){
-  const sectorCols = shuffled([...COLORS]);
-  const blobCols   = shuffled([...COLORS]);
+  // which palette slot lands in which wedge / blob; the colours themselves
+  // come from applyTitlePalette(), so they can keep tweening on a retune
+  TITLE.wedgeSlot = shuffled([0, 1, 2]);
+  TITLE.blobSlot  = shuffled([0, 1, 2]);
 
   const s1 = 120 + tRnd(-28, 28), s2 = 240 + tRnd(-28, 28);
   const cuts = [0, s1, s2, 360];
   TITLE.wedges.forEach((w, i) => {
     w.setAttribute('d', wedgePath(100, 54, 180, cuts[i], cuts[i + 1]));
-    w.setAttribute('fill', sectorCols[i]);
   });
 
   const blobBase = [];
@@ -675,9 +836,7 @@ function titleRandomize(){
     blobBase.push(r0);
     b.setAttribute('r', r0.toFixed(1));
     b.removeAttribute('transform');
-    const stops = TITLE.grads[i].children;
-    for (let k = 0; k < 3; k++) stops[k].setAttribute('stop-color', blobCols[i]);
-    stops[1].setAttribute('offset', tRnd(0.32, 0.68).toFixed(2));
+    TITLE.grads[i].children[1].setAttribute('offset', tRnd(0.32, 0.68).toFixed(2));
   });
 
   TITLE.fx = {
@@ -694,6 +853,7 @@ function titleRandomize(){
     }))
   };
   TITLE.pie.setAttribute('transform', `rotate(${TITLE.fx.a0} 100 54)`);
+  applyTitlePalette();
 }
 
 function titleTick(dt){
@@ -741,7 +901,7 @@ let pending = null;          // next composition, built at click time
 // Build a whole new composition without showing it yet. The texture work is the
 // slow part, so it happens on the click rather than mid-transition.
 function buildComposition(){
-  const colorOrder = shuffled([...COLORS]);   // which colour sits in which layer
+  const slotOrder  = shuffled([0, 1, 2]);     // which palette slot sits in which layer
   const depthOrder = shuffled([0, 1, 2]);     // which layer sits where in depth
   const frame = 9 + Math.random() * 7;
 
@@ -754,15 +914,15 @@ function buildComposition(){
   // can carry exactly half of it outside the composition (see the render loop)
   // and the border looks the same in every view.
   return planes.map(pl => {
-    const color = colorOrder[pl.i];
+    const slot = slotOrder[pl.i];
     const depth = depthOrder[pl.i];
     const nc = 3 + Math.floor(Math.random() * 4); // 3..6 columns
     const nr = 3 + Math.floor(Math.random() * 4); // 3..6 rows
     const v = randCuts(nc, 0.07);
     const h = randCuts(nr, 0.07);
     return {
-      color, depth, frame, pose: randomPose(depth),
-      tex: makeGridTexture(color, maxAniso, v, h, frame)
+      slot, depth, frame, pose: randomPose(depth),
+      tex: makeGridTexture(maxAniso, v, h, frame)
     };
   });
 }
@@ -788,7 +948,7 @@ function swapIn(){
   for (const pl of planes){
     const n = pending[pl.i];
     [pl.mat.map, pl.lineMap.value, pl.revealMap.value].forEach(t => t && t.dispose());
-    pl.color = n.color;
+    pl.slot = n.slot;
     pl.depth = n.depth;
     pl.pose = n.pose;
     pl.mat.map = n.tex.cell;
@@ -800,6 +960,7 @@ function swapIn(){
   pending = null;
   exitRise = 0;
   setArtworkFade(false, 1);
+  applyPalette();          // the new layers pick up the current palette
   reveal();
   shufflePhase = 'in';
 }
@@ -847,6 +1008,50 @@ dom.addEventListener('wheel', e => {
   dst.dist = Math.min(Math.max(dst.dist * (1 + Math.sign(e.deltaY) * 0.1), 4), 60);
 }, { passive: false });
 
+/* ------------------------------------------------------------------ *
+ *  Cell picking: coloured cell = retune, blank background = reset
+ * ------------------------------------------------------------------ */
+
+const raycaster = new THREE.Raycaster();
+const _ndc = new THREE.Vector2();
+const _uvC = new THREE.Vector2();
+const _uvL = new THREE.Vector2();
+let pickReady = false;    // armed by the frame loop once the infinity fill lands
+
+// one texel from a canvas texture, mirroring the shader's uv mapping and
+// CanvasTexture's flipY, so what we sample is what is drawn
+function sampleTexel(canvas, u, v){
+  const x = Math.floor((((u % 1) + 1) % 1) * canvas.width) % canvas.width;
+  const y = Math.floor((1 - (((v % 1) + 1) % 1)) * canvas.height) % canvas.height;
+  return canvas.getContext('2d').getImageData(x, y, 1, 1).data;
+}
+
+// Walk the planes front to back; the first one that draws anything decides
+// what the click is. A gridline or a black cell is ink (inert), a white-mask
+// fill is a coloured cell, and a point no plane draws is the background.
+function pickAt(clientX, clientY){
+  const rect = dom.getBoundingClientRect();
+  _ndc.set(((clientX - rect.left) / rect.width) * 2 - 1,
+           -((clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(_ndc, camera);
+  for (const hit of raycaster.intersectObjects(planes.map(p => p.mesh), false)){
+    const pl = hit.object.userData.plane;
+    _uvC.copy(hit.uv).multiply(uCellUVS.value).add(uCellUVO.value);
+    _uvL.copy(hit.uv).multiply(uLineUVS.value).add(uLineUVO.value);
+    if (sampleTexel(pl.lineMap.value.image, _uvL.x, _uvL.y)[3] > 127) return { kind: 'ink' };
+    const px = sampleTexel(pl.mat.map.image, _uvC.x, _uvC.y);
+    if (px[3] > 127) return px[0] > 127 ? { kind: 'cell', plane: pl } : { kind: 'ink' };
+  }
+  return { kind: 'blank' };
+}
+
+dom.addEventListener('click', e => {
+  if (mode !== 'infinity' || !pickReady) return;
+  const pick = pickAt(e.clientX, e.clientY);
+  if (pick.kind === 'cell') retunePalette(pick.plane.slot);
+  else if (pick.kind === 'blank') resetPalette();   // absence of colour reads as clear
+});
+
 toggleBtn.addEventListener('click', () => {
   setMode((mode === 'top' || mode === 'split') ? '3d' : 'top');
 });
@@ -890,9 +1095,13 @@ function frame(now){
     const clamp01 = x => Math.min(1, Math.max(0, x));
     uLineReveal.value = ease(clamp01((infT - 0.45) / 1.5));
     uCellReveal.value = ease(clamp01((infT - 2.05) / 1.5));
+    pickReady = infT > 3.7;   // only clickable once the fill has landed
+  } else {
+    pickReady = false;
   }
 
-  titleTick(dt);   // title gradient drift
+  paletteTick(dt);   // palette crossfade from the last click
+  titleTick(dt);     // title gradient drift
 
   // The conveyor: float the current composition up and out of frame, then swap
   // in the next one while the frame is empty and let it rise into place. This
