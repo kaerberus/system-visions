@@ -1,0 +1,868 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>System Visions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@200;300;400&family=Inter:wght@200;300;400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --red:#db2b1c; --blue:#123fa0; --yellow:#f4c518; --ink:#111;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; overflow:hidden;
+    background:radial-gradient(120% 90% at 50% 25%, #fbf8f1 0%, #efe9dc 55%, #dcd4c3 100%);
+    font-family:'Inter',"Helvetica Neue",Helvetica,Arial,sans-serif;
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+  }
+  #stage{position:fixed; inset:0}
+  canvas{display:block; touch-action:none; cursor:grab}
+  canvas:active{cursor:grabbing}
+
+  .hud{position:fixed; inset:0; pointer-events:none}
+  .title{
+    position:absolute; top:clamp(16px,3vw,34px); left:clamp(16px,3vw,34px);
+    max-width:min(54ch,72vw);
+  }
+  .title h1{ position:relative; z-index:1; margin:0 }
+  /* The title is SVG so the palette gradient can be clipped to the exact glyph
+     geometry. The viewBox is a fixed design space (font-size 54 there); the CSS
+     height below reproduces the old clamp(28px,4vw,54px) size. */
+  .title-svg{
+    display:block; width:auto; height:clamp(78px,11vw,149px); aspect-ratio:200/108;
+    overflow:visible;
+  }
+  .title-svg .tg-line{
+    font-family:'Barlow Condensed','Archivo Narrow',"Helvetica Neue",Arial,sans-serif;
+    font-size:54px; font-weight:300; letter-spacing:-.01em;
+  }
+  /* black plate behind the title; slides in from off the left in infinity mode */
+  .title-box{
+    position:absolute; z-index:0; top:-14px; bottom:-14px; left:-18px; right:-18px;
+    background:var(--ink);
+    transform:translateX(calc(-100% - 60px));
+    transition:transform .7s cubic-bezier(.22,.8,.28,1);
+  }
+  body.infinity .title-box{
+    transform:translateX(0);
+    transition:transform .95s cubic-bezier(.22,.8,.28,1) .25s;
+  }
+  /* solid ink fill; it drains away in infinity mode, leaving the gradient */
+  #tg-ink{ fill:var(--ink); opacity:1; transition:opacity .55s ease }
+  body.infinity #tg-ink{ opacity:0; transition:opacity 1.05s ease 1.5s }
+  @media (prefers-reduced-motion:reduce){
+    .title-box, body.infinity .title-box{ transition:none }
+    body.infinity #tg-ink{ transition-duration:.01s; transition-delay:0s }
+  }
+
+  .controls{
+    position:absolute; bottom:clamp(16px,3vw,34px); left:50%; transform:translateX(-50%);
+    display:flex; flex-wrap:wrap; justify-content:center;
+  }
+  .controls button{
+    --tint:var(--ink);
+    pointer-events:auto; cursor:pointer;
+    width:48px; height:48px; padding:0; margin-right:10px;
+    display:grid; place-items:center; overflow:hidden;
+    border:1.5px solid var(--ink); background:rgba(255,255,255,.55);
+    border-radius:0; backdrop-filter:blur(6px);
+    color:var(--tint);
+    transition:background .18s ease,color .18s ease,transform .18s ease,
+               width .42s cubic-bezier(.4,0,.2,1), opacity .3s ease,
+               margin-right .42s cubic-bezier(.4,0,.2,1), border-width .3s ease;
+  }
+  .controls button:last-child{ margin-right:0 }
+  .controls button svg{ width:23px; height:23px; display:block; flex:none }
+  .controls button .ic-top{ display:none }
+  #toggle  { --tint:var(--blue) }
+  #explode { --tint:var(--yellow) }
+  #shuffle { --tint:var(--red) }
+  #toggle.is-top .ic-top{ display:block }
+  #toggle.is-top .ic-3d{ display:none }
+  .controls button:hover{ background:var(--tint); color:#fbf8f1; transform:translateY(-1px) }
+  #explode:hover{ color:var(--ink) }         /* dark icon reads on yellow */
+  #explode.is-split{ background:var(--tint); color:var(--ink) }
+  .controls button:active{ transform:translateY(0) }
+  #infinity{ --tint:var(--ink) }
+  #infinity.is-on{ background:var(--ink); color:#fbf8f1 }
+  /* infinity mode fades the other controls away and lets the infinity button
+     glide into the centre */
+  body.infinity #toggle,
+  body.infinity #explode,
+  body.infinity #shuffle{
+    width:0; opacity:0; margin-right:0; border-width:0; pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div class="hud">
+  <div class="title">
+    <div class="title-box" aria-hidden="true"></div>
+    <h1 aria-label="System Visions">
+      <svg class="title-svg" viewBox="0 0 200 108" preserveAspectRatio="xMinYMin meet" aria-hidden="true" focusable="false">
+        <defs>
+          <filter id="tg-soft" x="-25%" y="-25%" width="150%" height="150%">
+            <feGaussianBlur stdDeviation="12"/>
+          </filter>
+          <radialGradient id="tg-g1">
+            <stop offset="0" stop-color="#db2b1c" stop-opacity="1"/>
+            <stop offset=".5" stop-color="#db2b1c" stop-opacity="1"/>
+            <stop offset="1" stop-color="#db2b1c" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="tg-g2">
+            <stop offset="0" stop-color="#123fa0" stop-opacity="1"/>
+            <stop offset=".5" stop-color="#123fa0" stop-opacity="1"/>
+            <stop offset="1" stop-color="#123fa0" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="tg-g3">
+            <stop offset="0" stop-color="#f4c518" stop-opacity="1"/>
+            <stop offset=".5" stop-color="#f4c518" stop-opacity="1"/>
+            <stop offset="1" stop-color="#f4c518" stop-opacity="0"/>
+          </radialGradient>
+          <clipPath id="tg-clip">
+            <text class="tg-line" x="0" y="46">System</text>
+            <text class="tg-line" x="0" y="100">Visions</text>
+          </clipPath>
+        </defs>
+
+        <!-- palette gradient, clipped to the letters -->
+        <g clip-path="url(#tg-clip)">
+          <g id="tg-pie" filter="url(#tg-soft)">
+            <path id="tg-w1" fill="#db2b1c"/>
+            <path id="tg-w2" fill="#123fa0"/>
+            <path id="tg-w3" fill="#f4c518"/>
+          </g>
+          <g id="tg-blobs">
+            <circle id="tg-b1" cx="60" cy="30" r="70" fill="url(#tg-g1)"/>
+            <circle id="tg-b2" cx="140" cy="70" r="70" fill="url(#tg-g2)"/>
+            <circle id="tg-b3" cx="100" cy="100" r="70" fill="url(#tg-g3)"/>
+          </g>
+          <rect id="tg-ink" x="-60" y="-60" width="320" height="240"/>
+        </g>
+      </svg>
+    </h1>
+  </div>
+  <div class="controls">
+    <button id="toggle" aria-label="Top view or 3D view" title="Top / 3D view">
+      <svg class="ic-3d" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M12 2.6 21 7v10l-9 4.4L3 17V7Z"/>
+        <path d="M3 7l9 4.4L21 7"/>
+        <path d="M12 11.4v10"/>
+      </svg>
+      <svg class="ic-top" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+        <rect x="3.5" y="3.5" width="17" height="17"/>
+        <path d="M3.5 9.7h17M3.5 14.5h17M9.7 3.5v17M14.5 3.5v17"/>
+      </svg>
+    </button>
+    <button id="explode" aria-label="Explode or collapse the grids" title="Explode / collapse">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M12 3 21 8l-9 5-9-5Z"/>
+        <path d="M3 12.4 12 17.4 21 12.4"/>
+        <path d="M3 16.4 12 21.4 21 16.4"/>
+      </svg>
+    </button>
+    <button id="shuffle" aria-label="Shuffle the composition" title="Shuffle">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M3 7h3.2c1.7 0 3.3.9 4.2 2.3l3.2 5.4c.9 1.4 2.5 2.3 4.2 2.3H21"/>
+        <path d="M3 17h3.2c1.3 0 2.5-.5 3.4-1.4"/>
+        <path d="M14.2 8.4C15 7.1 16.5 7 17.8 7H21"/>
+        <path d="M18.2 4l3 3-3 3"/>
+        <path d="M18.2 14l3 3-3 3"/>
+      </svg>
+    </button>
+    <button id="infinity" aria-label="Infinity mode" title="Infinity mode">
+      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+        <path d="M18.6 6.62c-1.44 0-2.8.56-3.77 1.53L12 10.66l-1.52 1.34h.01L7.8 14.39c-.64.64-1.49.99-2.4.99-1.87 0-3.39-1.51-3.39-3.38S3.53 8.62 5.4 8.62c.91 0 1.76.35 2.44 1.03l1.13 1 1.51-1.34L9.22 8.2C8.2 7.18 6.84 6.62 5.4 6.62 2.42 6.62 0 9.04 0 12s2.42 5.38 5.4 5.38c1.44 0 2.8-.56 3.77-1.53l2.83-2.5.01.01L13.52 12h-.01l2.69-2.39c.64-.64 1.49-.99 2.4-.99 1.87 0 3.39 1.51 3.39 3.38s-1.52 3.38-3.39 3.38c-.9 0-1.76-.35-2.44-1.03l-1.14-1.01-1.51 1.34 1.27 1.12c1.02 1.01 2.37 1.57 3.82 1.57 2.98 0 5.4-2.41 5.4-5.38s-2.42-5.38-5.4-5.38z"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
+
+<script>
+const DEG = Math.PI / 180;
+const SIZE = 4;                               // plane edge length
+const COLORS = ['#db2b1c', '#123fa0', '#f4c518']; // red, blue, yellow
+const LIFT = 5.2;                             // entrance height, in world units
+const BLACK_CELL_CHANCE = 0.05;               // rare all-black cell (5%)
+const TILE_K = 7;                             // squares per cell tile (odd)
+const TILE_P = 256;                           // pixels per square in the cell tile
+let frameW = 12;                              // outer frame weight, in tile px (per shuffle)
+
+/* ------------------------------------------------------------------ *
+ *  Random Mondrian-style cartesian grid -> canvas texture
+ * ------------------------------------------------------------------ */
+
+function shuffled(a){
+  for (let i = a.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// n cells with irregular, well-spaced cut positions in [0,1]
+function randCuts(n, minFrac){
+  const inner = [];
+  for (let i = 0; i < n - 1; i++) inner.push(minFrac + Math.random() * (1 - 2 * minFrac));
+  inner.sort((a, b) => a - b);
+  for (let i = 1; i < inner.length; i++)
+    if (inner[i] - inner[i - 1] < minFrac) inner[i] = inner[i - 1] + minFrac;
+  for (let i = inner.length - 1; i >= 0; i--){
+    const cap = (i === inner.length - 1) ? 1 - minFrac : inner[i + 1] - minFrac;
+    if (inner[i] > cap) inner[i] = cap;
+  }
+  return [0, ...inner, 1];
+}
+
+// pick cells to colour, never orthogonally adjacent (keeps blocks separated)
+function pickFills(nc, nr, count){
+  const cells = [];
+  for (let c = 0; c < nc; c++) for (let r = 0; r < nr; r++) cells.push([c, r]);
+  shuffled(cells);
+  const taken = new Set();
+  const out = [];
+  const has = (c, r) => taken.has(c + ',' + r);
+  for (const [c, r] of cells){
+    if (out.length >= count) break;
+    if (has(c - 1, r) || has(c + 1, r) || has(c, r - 1) || has(c, r + 1)) continue;
+    if (Math.random() < 0.9){ taken.add(c + ',' + r); out.push([c, r]); }
+  }
+  return out;
+}
+
+function makeGridTexture(color, maxAniso, v, h, frameW){
+  const SC = TILE_K * TILE_P, SL = 1024, K = TILE_K, SR = K * 128;
+  const mk = n => { const c = document.createElement('canvas'); c.width = c.height = n; return c; };
+  const cellCv = mk(SC), tileCv = mk(SL), revCv = mk(SR);
+  const cg = cellCv.getContext('2d'); cg.clearRect(0, 0, SC, SC);
+  const tg = tileCv.getContext('2d'); tg.clearRect(0, 0, SL, SL);
+  const rg = revCv.getContext('2d'); rg.clearRect(0, 0, SR, SR);
+
+  const nc = v.length - 1;                      // columns
+  const nr = h.length - 1;                      // rows
+  const centreFills = pickFills(nc, nr, 3 + Math.floor(Math.random() * 4));
+  const mid = (K - 1) / 2;
+  const RP = SR / K;                              // pixels per square in the reveal map
+
+  // Cells. The centre square keeps the composition; every other square in the
+  // tile gets its own fresh random set, so the infinity extension reads as new
+  // cells rather than a repeat of the original. The reveal map stores, in every
+  // texel a fill covers, where that texel sits inside its own cell (rg, 0..1)
+  // plus how far the cell's centre is from the tile centre (b), so a cell can
+  // grow out of its own middle while the mask stays pinned to the same rect the
+  // fill was drawn in. Only texels of a cell ever carry its own data, and the
+  // shader clamps them, so no fill can reach across a gridline.
+  rg.globalCompositeOperation = 'lighter';
+  for (let sj = 0; sj < K; sj++){
+    for (let si = 0; si < K; si++){
+      const isCentre = si === mid && sj === mid;
+      const fills = isCentre ? centreFills : pickFills(nc, nr, 3 + Math.floor(Math.random() * 4));
+      for (const [c, r] of fills){
+        const x0 = (si + v[c]) * TILE_P, y0 = (sj + h[r]) * TILE_P;
+        const w = (v[c + 1] - v[c]) * TILE_P, hh = (h[r + 1] - h[r]) * TILE_P;
+        cg.fillStyle = Math.random() < BLACK_CELL_CHANCE ? '#0e0e0e' : color;
+        cg.fillRect(x0, y0, w, hh);
+
+        // cell-local position, 0..1 across the cell, as a pair of gradients
+        // (canvas clamps at the stops, so edge texels read as 0 or 1)
+        const gx0 = (si + v[c]) * RP, gy0 = (sj + h[r]) * RP;
+        const gx1 = (si + v[c + 1]) * RP, gy1 = (sj + h[r + 1]) * RP;
+        const gx = rg.createLinearGradient(gx0, 0, gx1, 0);
+        gx.addColorStop(0, 'rgba(0,0,0,1)');
+        gx.addColorStop(1, 'rgba(255,0,0,1)');
+        const gy = rg.createLinearGradient(0, gy0, 0, gy1);
+        gy.addColorStop(0, 'rgba(0,0,0,1)');
+        gy.addColorStop(1, 'rgba(0,255,0,1)');
+        // how far this cell's centre is from the tile centre, normalised so a
+        // tile corner is 1 — the shader turns it back into the wave radius
+        const q = Math.min(1, 2 * Math.hypot(
+          si + (v[c] + v[c + 1]) / 2 - K / 2,
+          sj + (h[r] + h[r + 1]) / 2 - K / 2) / K);
+        const rx0 = Math.max(si * RP, gx0), ry0 = Math.max(sj * RP, gy0);
+        const rx1 = Math.min((si + 1) * RP, gx1), ry1 = Math.min((sj + 1) * RP, gy1);
+        if (rx1 <= rx0 || ry1 <= ry0) continue;
+        rg.fillStyle = gx; rg.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+        rg.fillStyle = gy; rg.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+        rg.fillStyle = `rgba(0,0,${Math.round(q * 255)},1)`;
+        rg.fillRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+      }
+    }
+  }
+  rg.globalCompositeOperation = 'source-over';
+
+  // Black cartesian gridlines. Base weight drifts between 9 and 16 px;
+  // interior lines are nudged within a tight band around that base. The tile
+  // has no heavy frame, so the same thin grid works in every view — the outer
+  // edge lines are centred and complete each other when the tile repeats.
+  // The four edge lines use the shared frame weight instead of a random one:
+  // the plane always shows half a frame past the composition's edge, so those
+  // two halves must match, in every layer, for the border to stay put.
+  const ink = '#0e0e0e';
+  const base = 9 + Math.random() * 7;
+  const LINE_MIN = 0.90, LINE_MAX = 1.16;
+  const randW = () => base * (LINE_MIN + Math.random() * (LINE_MAX - LINE_MIN));
+
+  tg.fillStyle = ink;
+  for (let k = 0; k < v.length; k++){
+    const w = (k === 0 || k === v.length - 1) ? frameW : randW();
+    tg.fillRect(v[k] * SL - w / 2, 0, w, SL);
+  }
+  for (let k = 0; k < h.length; k++){
+    const w = (k === 0 || k === h.length - 1) ? frameW : randW();
+    tg.fillRect(0, h[k] * SL - w / 2, SL, w);
+  }
+
+  const cell = new THREE.CanvasTexture(cellCv);
+  cell.colorSpace = THREE.SRGBColorSpace; cell.anisotropy = maxAniso;
+  cell.wrapS = cell.wrapT = THREE.RepeatWrapping;
+
+  const line = new THREE.CanvasTexture(tileCv);
+  line.colorSpace = THREE.SRGBColorSpace; line.anisotropy = maxAniso;
+  line.wrapS = line.wrapT = THREE.RepeatWrapping;
+
+  const reveal = new THREE.CanvasTexture(revCv);
+  reveal.colorSpace = THREE.NoColorSpace;
+  reveal.generateMipmaps = false;
+  reveal.minFilter = THREE.NearestFilter;
+  reveal.magFilter = THREE.NearestFilter;
+
+  return { cell, line, reveal };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Scene
+ * ------------------------------------------------------------------ */
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('stage').appendChild(renderer.domElement);
+const maxAniso = renderer.capabilities.getMaxAnisotropy();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 200);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+// A small studio rig whose key and fill travel with the camera, so whichever
+// side of the artwork faces the viewer is always lit — front or back.
+const key  = new THREE.DirectionalLight(0xffffff, 2.2); scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.8); scene.add(fill);
+
+const _camDir   = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
+const _camUp    = new THREE.Vector3();
+
+function updateLights(){
+  _camDir.copy(camera.position).normalize();
+  _camRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  _camUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  key.position.copy(_camDir)
+    .addScaledVector(_camUp, 0.55)
+    .addScaledVector(_camRight, -0.40)
+    .normalize();
+  fill.position.copy(_camDir)
+    .addScaledVector(_camUp, -0.50)
+    .addScaledVector(_camRight, 0.60)
+    .normalize();
+}
+
+const geo = new THREE.PlaneGeometry(SIZE, SIZE, 1, 1);
+
+// Infinity-mode animation state, shared across the three materials.
+const uLineReveal = { value: 1 };   // 0..1 how far the gridlines have spread
+const uCellReveal = { value: 1 };   // 0..1 how far the cells have filled in
+const uLineDir    = { value: 1 };   // +1 spread outward, -1 arrive from outside
+const uS          = { value: 1 };   // current plane scale (world coords)
+const uMaxRadius  = { value: 10 };  // half the canvas diagonal, in world units
+const uR0         = { value: 0.3 }; // radius of the original square's edge
+const uSpan       = { value: 0.42 }; // width of each cell's fade-in window
+const uFrame      = { value: 0.03 }; // half the outer frame line, in world units
+const uCellUVS    = { value: new THREE.Vector2(1, 1) };
+const uCellUVO    = { value: new THREE.Vector2(0, 0) };
+const uLineUVS    = { value: new THREE.Vector2(1, 1) };
+const uLineUVO    = { value: new THREE.Vector2(0, 0) };
+
+const HALF = (SIZE / 2).toFixed(4);
+
+const planes = COLORS.map((color, i) => {
+  const mat = new THREE.MeshLambertMaterial({
+    alphaTest: 0.5, side: THREE.DoubleSide
+  });
+  const lineMap   = { value: null };
+  const revealMap = { value: null };
+
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uLineMap    = lineMap;
+    shader.uniforms.uRevealMap  = revealMap;
+    shader.uniforms.uLineReveal = uLineReveal;
+    shader.uniforms.uCellReveal = uCellReveal;
+    shader.uniforms.uLineDir    = uLineDir;
+    shader.uniforms.uS          = uS;
+    shader.uniforms.uMaxRadius  = uMaxRadius;
+    shader.uniforms.uR0         = uR0;
+    shader.uniforms.uSpan       = uSpan;
+    shader.uniforms.uFrame      = uFrame;
+    shader.uniforms.uCellUVS    = uCellUVS;
+    shader.uniforms.uCellUVO    = uCellUVO;
+    shader.uniforms.uLineUVS    = uLineUVS;
+    shader.uniforms.uLineUVO    = uLineUVO;
+
+    shader.vertexShader = shader.vertexShader
+      .replace('void main() {', 'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vUv = uv;\n  vLocal = position.xy;');
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('void main() {',
+        'uniform sampler2D uLineMap;\nuniform sampler2D uRevealMap;\n' +
+        'uniform vec2 uCellUVS;\nuniform vec2 uCellUVO;\n' +
+        'uniform vec2 uLineUVS;\nuniform vec2 uLineUVO;\n' +
+        'uniform float uLineReveal;\nuniform float uCellReveal;\n' +
+        'uniform float uLineDir;\nuniform float uS;\n' +
+        'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\n' +
+        'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
+      .replace('#include <map_fragment>', `#include <map_fragment>
+  {
+    vec2 uvC = vUv * uCellUVS + uCellUVO;
+    vec2 uvL = vUv * uLineUVS + uLineUVO;
+    vec4 cellT = texture2D(map, uvC);
+    vec4 lineT = texture2D(uLineMap, uvL);
+    vec4 rev = texture2D(uRevealMap, uvC);
+    // where this fragment sits inside its own cell (-1..1, clamped so a cell
+    // can never reach outside itself) and how far the cell's centre is from
+    // the tile centre. The grow mask is cut from the cell's own rect, exactly
+    // where the fill was drawn, so colours stay inside their grid cell.
+    vec2 local = clamp(rev.rg * 2.0 - 1.0, -1.0, 1.0);
+    vec2 wFrag = vLocal * uS;
+    float insideF = step(abs(wFrag.x), ${HALF}) * step(abs(wFrag.y), ${HALF});
+    float rF = length(wFrag) / max(uMaxRadius, 0.0001);
+    float rOutF = clamp((rF - uR0) / max(1.0 - uR0, 0.0001), 0.0, 1.0);
+    float rC = rev.b * ${(TILE_K * SIZE / 2).toFixed(4)} / max(uMaxRadius, 0.0001);
+    float rOutC = clamp((rC - uR0) / max(1.0 - uR0, 0.0001), 0.0, 1.0);
+    // the composition and the half frame line the plane carries outside it are
+    // always drawn, so the border never thins while the infinity lines spread
+    // outward or retract around it
+    float insideL = step(abs(wFrag.x), ${HALF} + uFrame) * step(abs(wFrag.y), ${HALF} + uFrame);
+    float lineA = insideL > 0.5 ? 1.0
+                : (uLineDir > 0.0 ? step(rOutF, uLineReveal) : step(1.0 - uLineReveal, rOutF));
+    // each cell fades in over its own window and grows into place, timed by
+    // the radial wave — reads as the fill arriving from outside and settling.
+    // The 1 + uSpan stretch lets the outermost cells finish exactly as
+    // uCellReveal reaches 1, so the far corners are not left half tinted.
+    float p = clamp((uCellReveal * (1.0 + uSpan) - rOutC) / uSpan, 0.0, 1.0);
+    p = p * p * (3.0 - 2.0 * p);
+    float grow = mix(0.22, 1.0, p);
+    float covered = step(abs(local.x), grow) * step(abs(local.y), grow);
+    float cellA = insideF > 0.5 ? 1.0 : covered * p;
+    vec4 comp = vec4(lineT.rgb, lineT.a * lineA)
+              + vec4(cellT.rgb, cellT.a * cellA) * (1.0 - lineT.a * lineA);
+    diffuseColor = vec4(diffuse, opacity) * comp;
+  }`);
+  };
+
+  const mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh);
+  return { color, i, depth: i, mesh, mat, lineMap, revealMap, pose: randomPose(i) };
+});
+
+function randomPose(depth){
+  const rand = (a, b) => a + Math.random() * (b - a);
+  return {
+    x: (depth - 1) * rand(0.30, 0.55) + rand(-0.15, 0.15),
+    y: rand(-0.5, 0.5),
+    z: (depth - 1) * 0.85,
+    rx: rand(-11, 11) * DEG,
+    ry: rand(-11, 11) * DEG,
+    rz: rand(-12, 12) * DEG
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Camera views + smoothing
+ * ------------------------------------------------------------------ */
+
+// Every view is a point on a turntable around the artwork, which always
+// pivots on its own centre (the world origin):
+//   theta   azimuth around the vertical (Y) axis  -> clean horizontal yaw
+//   phi     polar angle from +Y (PI/2 = facing the camera)
+//   spread  1 = grids fanned out through depth, 0 = perfectly aligned
+//   explode 1 = grids laid out side by side, flat and non-overlapping
+const VIEW3D    = { theta: 0.70, phi: 1.08, spread: 1, explode: 0 };
+const VIEWTOP   = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 0 };
+const VIEWSPLIT = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 1 };
+
+const cur = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
+const dst = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
+const dists = { d3d: 12.6, dtop: 9, dsplit: 18, fillScale: 2 };
+
+function applyCamera(v){
+  const { theta: t, phi: p, dist: d } = v;
+  camera.position.set(
+    d * Math.sin(p) * Math.sin(t),
+    d * Math.cos(p),
+    d * Math.sin(p) * Math.cos(t)
+  );
+  camera.up.set(0, 1, 0);
+  camera.lookAt(0, 0, 0);
+}
+
+// distance needed to fit a world extent (full width / height) in frame
+function distToFit(needW, needH){
+  const half = Math.tan(camera.fov * DEG / 2);
+  return Math.max(needH / (2 * half), needW / (2 * half * camera.aspect));
+}
+
+// side-by-side layout direction follows the viewport shape
+function explodeAxis(){
+  return camera.aspect >= 1 ? { dx: SIZE * 1.12, dy: 0 } : { dx: 0, dy: SIZE * 1.12 };
+}
+
+function fitViews(){
+  dists.d3d  = Math.max(12.6, distToFit(SIZE * 1.5, SIZE * 1.5));
+  dists.dtop = Math.max(9.0,  distToFit(SIZE * 1.38, SIZE * 1.38));
+  const ax = explodeAxis();
+  const spanX = Math.abs(ax.dx) * 2 + SIZE;
+  const spanY = Math.abs(ax.dy) * 2 + SIZE;
+  dists.dsplit = distToFit(spanX * 1.12, spanY * 1.12);
+
+  // how much a plane must grow so its pattern reaches the viewport edges
+  const visH = 2 * dists.dtop * Math.tan(camera.fov * DEG / 2);
+  const visW = visH * camera.aspect;
+  dists.fillScale = Math.max(visW, visH) * 1.06 / SIZE;
+  uMaxRadius.value = 0.5 * Math.hypot(visW, visH);
+  uR0.value = (SIZE * 0.5) / uMaxRadius.value;
+}
+
+const toggleBtn   = document.getElementById('toggle');
+const explodeBtn  = document.getElementById('explode');
+const infinityBtn = document.getElementById('infinity');
+let mode = '3d';
+let infT = 0;              // seconds since infinity mode was entered
+
+function updateToggleIcon(){
+  // show the grid icon (i.e. "press to collapse to top") unless we are
+  // already sitting in the aligned top view or the exploded row
+  toggleBtn.classList.toggle('is-top', mode !== 'top' && mode !== 'split');
+}
+
+function setMode(next){
+  document.body.classList.remove('infinity');
+  infinityBtn.classList.remove('is-on');
+  uLineReveal.value = 1;      // everything shown outside infinity mode
+  uCellReveal.value = 1;
+  mode = next;
+  updateToggleIcon();
+  explodeBtn.classList.toggle('is-split', next === 'split');
+
+  const src = next === '3d' ? VIEW3D : next === 'split' ? VIEWSPLIT : VIEWTOP;
+  dst.theta   = src.theta;
+  dst.phi     = src.phi;
+  dst.spread  = src.spread;
+  dst.explode = src.explode;
+  dst.dist    = next === '3d' ? dists.d3d : next === 'split' ? dists.dsplit : dists.dtop;
+  dst.fill    = 0;
+}
+
+function reveal(){
+  // Start below the frame in the layered 3D pose, then levitate up *while*
+  // rotating to face the camera and collapsing — one continuous motion.
+  Object.assign(cur, VIEW3D); cur.dist = dists.d3d; cur.rise = 1;
+  Object.assign(dst, VIEWTOP); dst.dist = dists.dtop; dst.rise = 0;
+  dst.fill = 0;
+  mode = 'top';
+  document.body.classList.remove('infinity');
+  infinityBtn.classList.remove('is-on');
+  uLineReveal.value = 1;
+  uCellReveal.value = 1;
+  updateToggleIcon();
+  explodeBtn.classList.remove('is-split');
+}
+
+// Infinity mode: the flat composition stays put while its repeating grid
+// spreads outward past the frame to the edges of the canvas — first the
+// black lines (from the centre out, or in from the edges), then the cells.
+function enterInfinity(){
+  mode = 'infinity';
+  infT = 0;
+  document.body.classList.add('infinity');
+  infinityBtn.classList.add('is-on');
+  updateToggleIcon();
+
+  dst.theta = VIEWTOP.theta; dst.phi = VIEWTOP.phi;
+  dst.spread = 0; dst.explode = 0;
+  dst.dist = dists.dtop;
+  dst.fill = 1;                       // pattern tiles, so this is not a zoom
+  cur.fill = 1;                       // apply immediately (visually identical)
+
+  uLineDir.value = Math.random() < 0.5 ? 1 : -1;   // outward or from the edges
+  uLineReveal.value = 0;
+  uCellReveal.value = 0;
+  titleRandomize();
+}
+
+function toggleInfinity(){
+  if (mode === 'infinity') setMode('top');
+  else enterInfinity();
+}
+
+/* ------------------------------------------------------------------ *
+ *  Title: palette gradient on a black plate (infinity mode only)
+ * ------------------------------------------------------------------ */
+
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const tRnd = (a, b) => a + Math.random() * (b - a);
+
+const TITLE = {
+  pie:    document.getElementById('tg-pie'),
+  wedges: [1, 2, 3].map(i => document.getElementById('tg-w' + i)),
+  blobs:  [1, 2, 3].map(i => document.getElementById('tg-b' + i)),
+  grads:  [1, 2, 3].map(i => document.getElementById('tg-g' + i)),
+  fx: null
+};
+
+// one slice of the rotating conic base
+function wedgePath(cx, cy, r, a0, a1){
+  const rad = a => a * DEG;
+  const x0 = cx + r * Math.cos(rad(a0)), y0 = cy + r * Math.sin(rad(a0));
+  const x1 = cx + r * Math.cos(rad(a1)), y1 = cy + r * Math.sin(rad(a1));
+  return `M${cx} ${cy}L${x0.toFixed(1)} ${y0.toFixed(1)}` +
+         `A${r} ${r} 0 0 1 ${x1.toFixed(1)} ${y1.toFixed(1)}Z`;
+}
+
+// a fresh palette gradient for each engagement of infinity mode
+function titleRandomize(){
+  const sectorCols = shuffled([...COLORS]);
+  const blobCols   = shuffled([...COLORS]);
+
+  const s1 = 120 + tRnd(-28, 28), s2 = 240 + tRnd(-28, 28);
+  const cuts = [0, s1, s2, 360];
+  TITLE.wedges.forEach((w, i) => {
+    w.setAttribute('d', wedgePath(100, 54, 180, cuts[i], cuts[i + 1]));
+    w.setAttribute('fill', sectorCols[i]);
+  });
+
+  const blobBase = [];
+  TITLE.blobs.forEach((b, i) => {
+    b.setAttribute('cx', tRnd(10, 190).toFixed(1));
+    b.setAttribute('cy', tRnd(-5, 113).toFixed(1));
+    const r0 = tRnd(44, 80);
+    blobBase.push(r0);
+    b.setAttribute('r', r0.toFixed(1));
+    b.removeAttribute('transform');
+    const stops = TITLE.grads[i].children;
+    for (let k = 0; k < 3; k++) stops[k].setAttribute('stop-color', blobCols[i]);
+    stops[1].setAttribute('offset', tRnd(0.32, 0.68).toFixed(2));
+  });
+
+  TITLE.fx = {
+    a0: tRnd(0, 360),                                        // start angle
+    spin: tRnd(12, 22) * (Math.random() < 0.5 ? -1 : 1),     // degrees / second
+    t: 0,
+    blobs: TITLE.blobs.map((b, i) => ({
+      r0: blobBase[i],                                       // base radius
+      ax: tRnd(18, 38), ay: tRnd(14, 32),                    // orbit radii
+      fx: tRnd(0.07, 0.15), fy: tRnd(0.07, 0.15),            // orbit speeds (Hz)
+      px: tRnd(0, Math.PI * 2), py: tRnd(0, Math.PI * 2),
+      rp: tRnd(0.06, 0.15), rf: tRnd(0.05, 0.12),            // radius breathing
+      rph: tRnd(0, Math.PI * 2)
+    }))
+  };
+  TITLE.pie.setAttribute('transform', `rotate(${TITLE.fx.a0} 100 54)`);
+}
+
+function titleTick(dt){
+  // the gradient only drifts while infinity mode is on
+  if (mode === 'infinity' && TITLE.fx && !reduceMotion){
+    const fx = TITLE.fx;
+    fx.t += dt;
+    TITLE.pie.setAttribute('transform', `rotate(${(fx.a0 + fx.spin * fx.t) % 360} 100 54)`);
+    TITLE.blobs.forEach((b, i) => {
+      const d = fx.blobs[i];
+      const dx = d.ax * Math.cos(d.px + fx.t * 2 * Math.PI * d.fx);
+      const dy = d.ay * Math.sin(d.py + fx.t * 2 * Math.PI * d.fy);
+      const r  = d.r0 * (1 + d.rp * Math.sin(d.rph + fx.t * 2 * Math.PI * d.rf));
+      b.setAttribute('transform', `translate(${dx.toFixed(2)} ${dy.toFixed(2)})`);
+      b.setAttribute('r', r.toFixed(1));
+    });
+  }
+}
+
+// the clip is cut from live text, so nudge it once the webfont has settled
+if (document.fonts && document.fonts.ready){
+  document.fonts.ready.then(() => {
+    const clipped = document.querySelector('.title-svg [clip-path]');
+    if (!clipped) return;
+    clipped.removeAttribute('clip-path');
+    void clipped.getBoundingClientRect();
+    clipped.setAttribute('clip-path', 'url(#tg-clip)');
+  });
+}
+
+function shuffle(){
+  const colorOrder = shuffled([...COLORS]);   // which colour sits in which layer
+  const depthOrder = shuffled([0, 1, 2]);     // which layer sits where in depth
+
+  // Every layer draws its own cartesian grid, so the three films never line up:
+  // the black you see is the union of all three, and a colour block can be cut
+  // by a line belonging to another layer. Cells still can't spill across their
+  // own layer's lines — each fill and its reveal mask share the same cuts.
+  //
+  // The composition's outer frame weight is shared by every layer, so the plane
+  // can carry exactly half of it outside the composition (see the render loop)
+  // and the border looks the same in every view.
+  frameW = 9 + Math.random() * 7;
+  for (const pl of planes){
+    pl.color = colorOrder[pl.i];
+    pl.depth = depthOrder[pl.i];
+    const nc = 3 + Math.floor(Math.random() * 4); // 3..6 columns
+    const nr = 3 + Math.floor(Math.random() * 4); // 3..6 rows
+    const v = randCuts(nc, 0.07);
+    const h = randCuts(nr, 0.07);
+    const tex = makeGridTexture(pl.color, maxAniso, v, h, frameW);
+    [pl.mat.map, pl.lineMap.value, pl.revealMap.value].forEach(t => t && t.dispose());
+    pl.mat.map = tex.cell;
+    pl.lineMap.value = tex.line;
+    pl.revealMap.value = tex.reveal;
+    pl.mat.needsUpdate = true;
+    pl.pose = randomPose(pl.depth);
+  }
+  reveal();
+}
+
+/* ------------------------------------------------------------------ *
+ *  Interaction
+ * ------------------------------------------------------------------ */
+
+let dragging = false, lastX = 0, lastY = 0;
+const dom = renderer.domElement;
+
+dom.addEventListener('pointerdown', e => {
+  if (mode === 'infinity') return;               // infinity mode is locked
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  dom.setPointerCapture(e.pointerId);
+});
+dom.addEventListener('pointermove', e => {
+  if (!dragging || mode === 'infinity') return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  dst.theta -= dx * 0.006;                                   // horizontal = yaw
+  dst.phi = Math.min(Math.max(dst.phi - dy * 0.006, 0.12), Math.PI - 0.12); // vertical = pitch
+  mode = 'custom';
+  updateToggleIcon();
+});
+dom.addEventListener('pointerup', () => { dragging = false; });
+dom.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (mode === 'infinity') return;
+  dst.dist = Math.min(Math.max(dst.dist * (1 + Math.sign(e.deltaY) * 0.1), 4), 60);
+}, { passive: false });
+
+toggleBtn.addEventListener('click', () => {
+  setMode((mode === 'top' || mode === 'split') ? '3d' : 'top');
+});
+explodeBtn.addEventListener('click', () => setMode(mode === 'split' ? 'top' : 'split'));
+infinityBtn.addEventListener('click', toggleInfinity);
+document.getElementById('shuffle').addEventListener('click', shuffle);
+
+/* ------------------------------------------------------------------ *
+ *  Resize + loop
+ * ------------------------------------------------------------------ */
+
+function resize(){
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  fitViews();
+  if (mode === '3d')            { dst.dist = cur.dist = dists.d3d; }
+  else if (mode === 'top')      { dst.dist = cur.dist = dists.dtop; }
+  else if (mode === 'split')    { dst.dist = cur.dist = dists.dsplit; }
+  else if (mode === 'infinity') { dst.dist = cur.dist = dists.dtop; }
+}
+window.addEventListener('resize', resize);
+
+let prev = performance.now();
+function frame(now){
+  const dt = Math.min((now - prev) / 1000, 0.05);
+  prev = now;
+
+  // Snappy while dragging, slow and cinematic for the automatic transitions
+  const rate = dragging ? 9.0 : 1.2;
+  const k = 1 - Math.exp(-dt * rate); // frame-rate independent easing
+  for (const p of ['theta', 'phi', 'dist', 'spread', 'explode']) cur[p] += (dst[p] - cur[p]) * k;
+  cur.rise += (dst.rise - cur.rise) * (1 - Math.exp(-dt * 1.2)); // levitation, matched to the rotation
+  cur.fill += (dst.fill - cur.fill) * (1 - Math.exp(-dt * 2.2)); // inf retract
+
+  // Infinity mode timeline: the lines spread first, then the cells fill in.
+  if (mode === 'infinity'){
+    infT += dt;
+    const ease = x => x * x * (3 - 2 * x);
+    const clamp01 = x => Math.min(1, Math.max(0, x));
+    uLineReveal.value = ease(clamp01((infT - 0.45) / 1.5));
+    uCellReveal.value = ease(clamp01((infT - 2.05) / 1.5));
+  }
+
+  titleTick(dt);   // title outline draw + gradient drift
+
+  applyCamera(cur);
+  updateLights();
+
+  const s = cur.spread, e = cur.explode, rise = cur.rise;
+  const ax = explodeAxis();
+  // The plane always shows half the outer frame line past the composition's
+  // edge, so the border keeps its full weight while infinity retracts (and the
+  // artwork never changes size). That half line lands on the line texture's own
+  // wrapped edge, so the ring reads as the border rather than the next square.
+  const span = 1 + cur.fill * (dists.fillScale - 1) + frameW / 1024;
+  uS.value = span;
+  uFrame.value = frameW / 512;       // half the frame line, in world units
+
+  // Cell/line tiling. The plane shows the central `span` squares of the
+  // K-square tile (so one square = SIZE world units, no zoom), centred on the
+  // tile, in every view.
+  const cellR = span / TILE_K;
+  const lineR = span;
+  uCellUVS.value.set(cellR, cellR); uCellUVO.value.set(0.5 - 0.5 * cellR, 0.5 - 0.5 * cellR);
+  uLineUVS.value.set(lineR, lineR); uLineUVO.value.set(0.5 - 0.5 * lineR, 0.5 - 0.5 * lineR);
+
+  for (const pl of planes){
+    const off = pl.i - 1;                        // -1, 0, 1 along the layout axis
+    const flat = s * (1 - e);                    // rotation / fan amount
+    const x = pl.pose.x * s * (1 - e) + off * ax.dx * e;
+    // stagger the starting height a little so the grids levitate in sequence
+    const y = pl.pose.y * s * (1 - e) + off * ax.dy * e - (LIFT + pl.i * 0.9) * rise;
+    const z = pl.depth * 0.014 + pl.pose.z * flat;
+    pl.mesh.position.set(x, y, z);
+    pl.mesh.rotation.set(pl.pose.rx * flat, pl.pose.ry * flat, pl.pose.rz * flat);
+    pl.mesh.scale.set(span, span, 1);
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+resize();
+shuffle();
+
+// optional deterministic override: ?view=top | 3d | split | infinity
+const viewParam = new URLSearchParams(location.search).get('view');
+if (viewParam === 'infinity'){
+  enterInfinity();
+  Object.assign(cur, dst);
+} else if (viewParam === 'top' || viewParam === '3d' || viewParam === 'split'){
+  setMode(viewParam);
+  Object.assign(cur, dst);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
