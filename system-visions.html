@@ -393,12 +393,15 @@ const uLineUVO    = { value: new THREE.Vector2(0, 0) };
 
 const HALF = (SIZE / 2).toFixed(4);
 
-const planes = COLORS.map((color, i) => {
+// One layered plane: a Lambert material patched to composite the cell texture,
+// the gridline texture and the radial infinity reveal. The per-plane maps live
+// in their own uniform objects; every other uniform is shared by all planes.
+function makePlane(){
+  const lineMap   = { value: null };
+  const revealMap = { value: null };
   const mat = new THREE.MeshLambertMaterial({
     alphaTest: 0.5, side: THREE.DoubleSide
   });
-  const lineMap   = { value: null };
-  const revealMap = { value: null };
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uLineMap    = lineMap;
@@ -470,8 +473,14 @@ const planes = COLORS.map((color, i) => {
 
   const mesh = new THREE.Mesh(geo, mat);
   scene.add(mesh);
-  return { color, i, depth: i, mesh, mat, lineMap, revealMap, pose: randomPose(i) };
-});
+  return { mesh, mat, lineMap, revealMap };
+}
+
+const planes = COLORS.map((color, i) =>
+  Object.assign(makePlane(), { color, i, depth: i, pose: randomPose(i) }));
+
+// artwork floating away after a shuffle (see shuffle() and the render loop)
+const outgoing = [];
 
 function randomPose(depth){
   const rand = (a, b) => a + Math.random() * (b - a);
@@ -710,6 +719,26 @@ function shuffle(){
   const colorOrder = shuffled([...COLORS]);   // which colour sits in which layer
   const depthOrder = shuffled([0, 1, 2]);     // which layer sits where in depth
 
+  // Hand the artwork that is on screen to planes of its own, which keep
+  // floating up and off the top in step with the new composition rising into
+  // place. The maps travel with them, so nothing is disposed until they are
+  // safely out of sight.
+  for (const pl of planes){
+    if (!pl.mat.map) continue;                // nothing to send off on first load
+    const g = makePlane();
+    g.mat.map = pl.mat.map;
+    g.lineMap.value = pl.lineMap.value;
+    g.revealMap.value = pl.revealMap.value;
+    g.mat.needsUpdate = true;
+    g.mesh.position.copy(pl.mesh.position);
+    g.mesh.rotation.copy(pl.mesh.rotation);
+    g.mesh.scale.copy(pl.mesh.scale);
+    outgoing.push({
+      mesh: g.mesh, mat: g.mat, lineMap: g.lineMap, revealMap: g.revealMap,
+      i: pl.i, base: pl.mesh.position.clone(), rise: 0
+    });
+  }
+
   // Every layer draws its own cartesian grid, so the three films never line up:
   // the black you see is the union of all three, and a colour block can be cut
   // by a line belonging to another layer. Cells still can't spill across their
@@ -727,7 +756,6 @@ function shuffle(){
     const v = randCuts(nc, 0.07);
     const h = randCuts(nr, 0.07);
     const tex = makeGridTexture(pl.color, maxAniso, v, h, frameW);
-    [pl.mat.map, pl.lineMap.value, pl.revealMap.value].forEach(t => t && t.dispose());
     pl.mat.map = tex.cell;
     pl.lineMap.value = tex.line;
     pl.revealMap.value = tex.reveal;
@@ -843,6 +871,22 @@ function frame(now){
     pl.mesh.position.set(x, y, z);
     pl.mesh.rotation.set(pl.pose.rx * flat, pl.pose.ry * flat, pl.pose.rz * flat);
     pl.mesh.scale.set(span, span, 1);
+  }
+
+  // Outgoing artwork drifts straight up and off the top on the same exponential
+  // as the entrance, so old and new stay exactly one entrance-height apart.
+  for (let k = outgoing.length - 1; k >= 0; k--){
+    const g = outgoing[k];
+    g.rise += (1 - g.rise) * (1 - Math.exp(-dt * 1.2));
+    g.mesh.position.set(g.base.x, g.base.y + (LIFT + g.i * 0.9) * g.rise, g.base.z);
+    if (g.rise > 0.99){                      // safely clear of the visible frame
+      scene.remove(g.mesh);
+      g.mat.map.dispose();
+      g.lineMap.value.dispose();
+      g.revealMap.value.dispose();
+      g.mat.dispose();
+      outgoing.splice(k, 1);
+    }
   }
 
   renderer.render(scene, camera);
