@@ -479,9 +479,6 @@ function makePlane(){
 const planes = COLORS.map((color, i) =>
   Object.assign(makePlane(), { color, i, depth: i, pose: randomPose(i) }));
 
-// artwork floating away after a shuffle (see shuffle() and the render loop)
-const outgoing = [];
-
 function randomPose(depth){
   const rand = (a, b) => a + Math.random() * (b - a);
   return {
@@ -527,6 +524,13 @@ function applyCamera(v){
 function distToFit(needW, needH){
   const half = Math.tan(camera.fov * DEG / 2);
   return Math.max(needH / (2 * half), needW / (2 * half * camera.aspect));
+}
+
+// how far the artwork has to travel to be clear of the frame at this camera
+// distance — its own half height (plus a little for the tilt of the fanned
+// planes) and some air
+function clearLift(dist){
+  return Math.max(LIFT, dist * Math.tan(camera.fov * DEG / 2) + SIZE * 0.6 + 1.2);
 }
 
 // side-by-side layout direction follows the viewport shape
@@ -581,9 +585,11 @@ function setMode(next){
 }
 
 function reveal(){
-  // Start below the frame in the layered 3D pose, then levitate up *while*
-  // rotating to face the camera and collapsing — one continuous motion.
-  Object.assign(cur, VIEW3D); cur.dist = dists.d3d; cur.rise = 1;
+  // Start clear of the frame in the layered 3D pose, then levitate up *while*
+  // rotating to face the camera and collapsing — one continuous motion. All of
+  // it happens off-screen, so the swap is never seen to jump.
+  Object.assign(cur, VIEW3D); cur.dist = dists.d3d;
+  cur.rise = clearLift(dists.d3d) / LIFT;
   Object.assign(dst, VIEWTOP); dst.dist = dists.dtop; dst.rise = 0;
   dst.fill = 0;
   mode = 'top';
@@ -715,29 +721,26 @@ if (document.fonts && document.fonts.ready){
   });
 }
 
-function shuffle(){
+/* ------------------------------------------------------------------ *
+ *  Shuffle: a vertical conveyor
+ * ------------------------------------------------------------------ */
+
+// The composition on screen floats up and off the top; only then — while the
+// frame is empty, so nothing can be seen to jump — is the next one placed below
+// it, to rise into view. One composition is ever in flight, so hammering the
+// button cannot pile them up.
+let shufflePhase = 'idle';   // idle | out | in
+let shuffleT = 0;            // seconds into the exit
+let exitLift = LIFT;         // world units the exit travels
+let exitRise = 0;            // 0..1 exit progress
+let pending = null;          // next composition, built at click time
+
+// Build a whole new composition without showing it yet. The texture work is the
+// slow part, so it happens on the click rather than mid-transition.
+function buildComposition(){
   const colorOrder = shuffled([...COLORS]);   // which colour sits in which layer
   const depthOrder = shuffled([0, 1, 2]);     // which layer sits where in depth
-
-  // Hand the artwork that is on screen to planes of its own, which keep
-  // floating up and off the top in step with the new composition rising into
-  // place. The maps travel with them, so nothing is disposed until they are
-  // safely out of sight.
-  for (const pl of planes){
-    if (!pl.mat.map) continue;                // nothing to send off on first load
-    const g = makePlane();
-    g.mat.map = pl.mat.map;
-    g.lineMap.value = pl.lineMap.value;
-    g.revealMap.value = pl.revealMap.value;
-    g.mat.needsUpdate = true;
-    g.mesh.position.copy(pl.mesh.position);
-    g.mesh.rotation.copy(pl.mesh.rotation);
-    g.mesh.scale.copy(pl.mesh.scale);
-    outgoing.push({
-      mesh: g.mesh, mat: g.mat, lineMap: g.lineMap, revealMap: g.revealMap,
-      i: pl.i, base: pl.mesh.position.clone(), rise: 0
-    });
-  }
+  const frame = 9 + Math.random() * 7;
 
   // Every layer draws its own cartesian grid, so the three films never line up:
   // the black you see is the union of all three, and a colour block can be cut
@@ -747,22 +750,70 @@ function shuffle(){
   // The composition's outer frame weight is shared by every layer, so the plane
   // can carry exactly half of it outside the composition (see the render loop)
   // and the border looks the same in every view.
-  frameW = 9 + Math.random() * 7;
-  for (const pl of planes){
-    pl.color = colorOrder[pl.i];
-    pl.depth = depthOrder[pl.i];
+  return planes.map(pl => {
+    const color = colorOrder[pl.i];
+    const depth = depthOrder[pl.i];
     const nc = 3 + Math.floor(Math.random() * 4); // 3..6 columns
     const nr = 3 + Math.floor(Math.random() * 4); // 3..6 rows
     const v = randCuts(nc, 0.07);
     const h = randCuts(nr, 0.07);
-    const tex = makeGridTexture(pl.color, maxAniso, v, h, frameW);
-    pl.mat.map = tex.cell;
-    pl.lineMap.value = tex.line;
-    pl.revealMap.value = tex.reveal;
-    pl.mat.needsUpdate = true;
-    pl.pose = randomPose(pl.depth);
+    return {
+      color, depth, frame, pose: randomPose(depth),
+      tex: makeGridTexture(color, maxAniso, v, h, frame)
+    };
+  });
+}
+
+// The exit dissolves the artwork, which needs real blending — the material's
+// alphaTest would otherwise cut the fade off at 50%. Toggling it costs one
+// shader variant, cached after the first shuffle.
+function setArtworkFade(fading, fade){
+  for (const pl of planes){
+    const m = pl.mat;
+    if (fading !== (m.alphaTest === 0)){
+      m.transparent = fading;
+      m.alphaTest = fading ? 0 : 0.5;
+      m.depthWrite = !fading;      // let the layers blend rather than occlude
+      m.needsUpdate = true;
+    }
+    m.opacity = fade;
   }
+}
+
+// move the pending composition onto the live planes, then let it rise in
+function swapIn(){
+  for (const pl of planes){
+    const n = pending[pl.i];
+    [pl.mat.map, pl.lineMap.value, pl.revealMap.value].forEach(t => t && t.dispose());
+    pl.color = n.color;
+    pl.depth = n.depth;
+    pl.pose = n.pose;
+    pl.mat.map = n.tex.cell;
+    pl.lineMap.value = n.tex.line;
+    pl.revealMap.value = n.tex.reveal;
+    pl.mat.needsUpdate = true;
+  }
+  frameW = pending[0].frame;
+  pending = null;
+  exitRise = 0;
+  setArtworkFade(false, 1);
   reveal();
+  shufflePhase = 'in';
+}
+
+function shuffle(){
+  if (shufflePhase === 'out') return;      // already leaving; let it finish
+  if (pending) for (const n of pending)    // a newer click replaced the queue
+    [n.tex.cell, n.tex.line, n.tex.reveal].forEach(t => t.dispose());
+  pending = buildComposition();
+
+  if (!planes[0].mat.map){ swapIn(); return; }   // first run: nothing to send off
+  exitLift = clearLift(cur.dist) + LIFT * cur.rise;
+  exitRise = 0;
+  shuffleT = 0;
+  dst.rise = cur.rise;                     // hold the entrance if it is mid-flight
+  shufflePhase = 'out';
+  setArtworkFade(true, 1);
 }
 
 /* ------------------------------------------------------------------ *
@@ -840,6 +891,21 @@ function frame(now){
 
   titleTick(dt);   // title gradient drift
 
+  // The conveyor: float the current composition up and out of frame, then swap
+  // in the next one while the frame is empty and let it rise into place. This
+  // runs before the camera is applied, so a swap takes effect on the very frame
+  // it happens and the new composition is placed against the camera it will
+  // actually be seen with — never a stale one, never already part on screen.
+  if (shufflePhase === 'out'){
+    shuffleT += dt;
+    const t = Math.min(1, shuffleT / 0.7);
+    exitRise = 1 - (1 - t) * (1 - t);        // ease-out, matching the entrance pace
+    setArtworkFade(true, 1 - t);             // and dissolve on the way out
+    if (t >= 1) swapIn();
+  } else if (shufflePhase === 'in' && cur.rise < 0.02){
+    shufflePhase = 'idle';
+  }
+
   applyCamera(cur);
   updateLights();
 
@@ -864,29 +930,16 @@ function frame(now){
   for (const pl of planes){
     const off = pl.i - 1;                        // -1, 0, 1 along the layout axis
     const flat = s * (1 - e);                    // rotation / fan amount
-    const x = pl.pose.x * s * (1 - e) + off * ax.dx * e;
-    // stagger the starting height a little so the grids levitate in sequence
-    const y = pl.pose.y * s * (1 - e) + off * ax.dy * e - (LIFT + pl.i * 0.9) * rise;
-    const z = pl.depth * 0.014 + pl.pose.z * flat;
-    pl.mesh.position.set(x, y, z);
+    const bx = pl.pose.x * s * (1 - e) + off * ax.dx * e;
+    const by = pl.pose.y * s * (1 - e) + off * ax.dy * e;
+    const bz = pl.depth * 0.014 + pl.pose.z * flat;
+    // stagger the entrance a little so the grids levitate in sequence; the exit
+    // floats the same lift back out. Both travel along the camera's own up axis,
+    // so they leave/arrive straight up the screen whatever the view.
+    const along = (exitLift + pl.i * 0.9) * exitRise - (LIFT + pl.i * 0.9) * rise;
+    pl.mesh.position.set(bx + _camUp.x * along, by + _camUp.y * along, bz + _camUp.z * along);
     pl.mesh.rotation.set(pl.pose.rx * flat, pl.pose.ry * flat, pl.pose.rz * flat);
     pl.mesh.scale.set(span, span, 1);
-  }
-
-  // Outgoing artwork drifts straight up and off the top on the same exponential
-  // as the entrance, so old and new stay exactly one entrance-height apart.
-  for (let k = outgoing.length - 1; k >= 0; k--){
-    const g = outgoing[k];
-    g.rise += (1 - g.rise) * (1 - Math.exp(-dt * 1.2));
-    g.mesh.position.set(g.base.x, g.base.y + (LIFT + g.i * 0.9) * g.rise, g.base.z);
-    if (g.rise > 0.99){                      // safely clear of the visible frame
-      scene.remove(g.mesh);
-      g.mat.map.dispose();
-      g.lineMap.value.dispose();
-      g.revealMap.value.dispose();
-      g.mat.dispose();
-      outgoing.splice(k, 1);
-    }
   }
 
   renderer.render(scene, camera);
