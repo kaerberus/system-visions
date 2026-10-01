@@ -32,6 +32,21 @@
   }
   body.dark #stage,
   body.dark .hud{ filter:invert(1) }
+  /* The dark-mode swap hides under a full-screen blink: fade to ink (or
+     paper, coming back), flip the classes while the veil is opaque, fade
+     out. A filter transition would wash the whole scene through mid-grey,
+     since interpolating invert() maps every colour to the same grey. */
+  .veil{
+    position:fixed; inset:0; z-index:10; pointer-events:none;
+    background:#0e0e0e; opacity:0; will-change:opacity;
+  }
+  .veil.blink{ animation:veil-blink .7s cubic-bezier(.4,0,.2,1) }
+  @keyframes veil-blink{
+    0%{ opacity:0 }
+    40%{ opacity:1 }
+    60%{ opacity:1 }
+    100%{ opacity:0 }
+  }
   canvas{display:block; touch-action:none; cursor:grab}
   canvas:active{cursor:grabbing}
 
@@ -69,6 +84,7 @@
   @media (prefers-reduced-motion:reduce){
     .title-box, body.infinity .title-box{ transition:none }
     body.infinity #tg-ink{ transition-duration:.01s; transition-delay:0s }
+    .veil.blink{ animation:none }
   }
 
   .controls{
@@ -197,6 +213,8 @@
     </button>
   </div>
 </div>
+
+<div class="veil" id="veil" aria-hidden="true"></div>
 
 <script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
 
@@ -1058,9 +1076,28 @@ function pickAt(clientX, clientY){
 }
 
 // A black cell is the one square that isn't colour, so it flips the whole
-// scene to its negative and back.
+// scene to its negative and back. The classes swap while the veil covers the
+// screen, so the cut is never seen; darkTarget tracks where we are headed, so
+// rapid clicks still land somewhere predictable.
+const veil = document.getElementById('veil');
+const VEIL_INK = '#0e0e0e', VEIL_PAPER = '#f2ede1';
+const VEIL_SWAP_MS = 330;            // inside the keyframe plateau, in the CSS
+let darkTarget = false;
+let darkTimer = 0;
+
 function toggleDark(){
-  document.body.classList.toggle('dark');
+  darkTarget = !darkTarget;
+  if (reduceMotion){
+    document.body.classList.toggle('dark', darkTarget);
+    return;
+  }
+  veil.style.background = darkTarget ? VEIL_INK : VEIL_PAPER;
+  veil.classList.remove('blink');
+  void veil.offsetWidth;              // restart the animation
+  veil.classList.add('blink');
+  clearTimeout(darkTimer);
+  darkTimer = setTimeout(
+    () => document.body.classList.toggle('dark', darkTarget), VEIL_SWAP_MS);
 }
 
 dom.addEventListener('click', e => {
