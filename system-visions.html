@@ -21,6 +21,17 @@
     -webkit-font-smoothing:antialiased;
   }
   #stage{position:fixed; inset:0}
+  /* Dark mode: a literal negative of the scene, toggled by clicking a black
+     cell in infinity mode. The paper is inverted explicitly because the body
+     background propagates to the viewport (filtering `body` itself would miss
+     it), while #stage (canvas) and .hud (title + controls) carry the rest of
+     the page. Snap, no fade — a filter transition would wash everything grey
+     halfway. */
+  body.dark{
+    background:radial-gradient(120% 90% at 50% 25%, #04070e 0%, #101623 55%, #232b3c 100%);
+  }
+  body.dark #stage,
+  body.dark .hud{ filter:invert(1) }
   canvas{display:block; touch-action:none; cursor:grab}
   canvas:active{cursor:grabbing}
 
@@ -1009,7 +1020,7 @@ dom.addEventListener('wheel', e => {
 }, { passive: false });
 
 /* ------------------------------------------------------------------ *
- *  Cell picking: coloured cell = retune, blank background = reset
+ *  Cell picking: coloured = retune, blank = reset, black = dark mode
  * ------------------------------------------------------------------ */
 
 const raycaster = new THREE.Raycaster();
@@ -1027,8 +1038,9 @@ function sampleTexel(canvas, u, v){
 }
 
 // Walk the planes front to back; the first one that draws anything decides
-// what the click is. A gridline or a black cell is ink (inert), a white-mask
-// fill is a coloured cell, and a point no plane draws is the background.
+// what the click is. A gridline is inert ink, a black cell is the dark-mode
+// switch, a white-mask fill is a coloured cell, and a point no plane draws is
+// the background.
 function pickAt(clientX, clientY){
   const rect = dom.getBoundingClientRect();
   _ndc.set(((clientX - rect.left) / rect.width) * 2 - 1,
@@ -1038,11 +1050,17 @@ function pickAt(clientX, clientY){
     const pl = hit.object.userData.plane;
     _uvC.copy(hit.uv).multiply(uCellUVS.value).add(uCellUVO.value);
     _uvL.copy(hit.uv).multiply(uLineUVS.value).add(uLineUVO.value);
-    if (sampleTexel(pl.lineMap.value.image, _uvL.x, _uvL.y)[3] > 127) return { kind: 'ink' };
+    if (sampleTexel(pl.lineMap.value.image, _uvL.x, _uvL.y)[3] > 127) return { kind: 'line' };
     const px = sampleTexel(pl.mat.map.image, _uvC.x, _uvC.y);
-    if (px[3] > 127) return px[0] > 127 ? { kind: 'cell', plane: pl } : { kind: 'ink' };
+    if (px[3] > 127) return px[0] > 127 ? { kind: 'cell', plane: pl } : { kind: 'black' };
   }
   return { kind: 'blank' };
+}
+
+// A black cell is the one square that isn't colour, so it flips the whole
+// scene to its negative and back.
+function toggleDark(){
+  document.body.classList.toggle('dark');
 }
 
 dom.addEventListener('click', e => {
@@ -1050,6 +1068,7 @@ dom.addEventListener('click', e => {
   const pick = pickAt(e.clientX, e.clientY);
   if (pick.kind === 'cell') retunePalette(pick.plane.slot);
   else if (pick.kind === 'blank') resetPalette();   // absence of colour reads as clear
+  else if (pick.kind === 'black') toggleDark();
 });
 
 toggleBtn.addEventListener('click', () => {
