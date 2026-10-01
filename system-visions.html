@@ -251,6 +251,13 @@ const BLACK_CELL_CHANCE = 0.05;               // rare all-black cell (5%)
 const TILE_K = 7;                             // squares per cell tile (odd)
 const TILE_P = 256;                           // pixels per square in the cell tile
 let frameW = 12;                              // outer frame weight, in tile px (per shuffle)
+// Ink coverage: the plane shader multiplies the sampled line and frame alphas
+// by INK_GAIN (see the plane patch). Two plates' line edges are sub-pixel soft,
+// and where they overlap the two half-coverages leave a hairline of paper down
+// the middle of a mark that should read solid black; the gain pushes the
+// partial coverages up so overlaps merge. The price is a ~1px bolder line
+// (top-view dark-pixel count +16% at 2.0) — lower the gain if they read heavy.
+const INK_GAIN = 2.0;
 
 /* ------------------------------------------------------------------ *
  *  Random Mondrian-style cartesian grid -> canvas texture
@@ -297,9 +304,10 @@ function pickFills(nc, nr, count){
 function makeGridTexture(maxAniso, v, h, frameW){
   const SC = TILE_K * TILE_P, SL = 1024, K = TILE_K, SR = K * 128;
   const mk = n => { const c = document.createElement('canvas'); c.width = c.height = n; return c; };
-  const cellCv = mk(SC), tileCv = mk(SL), revCv = mk(SR);
+  const cellCv = mk(SC), tileCv = mk(SL), frameCv = mk(SL), revCv = mk(SR);
   const cg = cellCv.getContext('2d'); cg.clearRect(0, 0, SC, SC);
   const tg = tileCv.getContext('2d'); tg.clearRect(0, 0, SL, SL);
+  const fg = frameCv.getContext('2d'); fg.clearRect(0, 0, SL, SL);
   const rg = revCv.getContext('2d'); rg.clearRect(0, 0, SR, SR);
 
   const nc = v.length - 1;                      // columns
@@ -361,9 +369,21 @@ function makeGridTexture(maxAniso, v, h, frameW){
   // interior lines are nudged within a tight band around that base. The tile
   // has no heavy frame, so the same thin grid works in every view — the outer
   // edge lines are centred and complete each other when the tile repeats.
-  // The four edge lines use the shared frame weight instead of a random one:
-  // the plane always shows half a frame past the composition's edge, so those
-  // two halves must match, in every layer, for the border to stay put.
+  // The four edge lines are the plate's own frame: they drift with the print,
+  // so every plate stays a framed composition as it moves. The same strips are
+  // also drawn alone into the frame map, a fixed painting frame that fades in
+  // with the drift (see uFrameAmt) so the artwork's boundary never breaks.
+  // The plane always shows half a frame past the composition's edge, so those
+  // halves must match, in every layer, for the border to stay put.
+  //
+  // The plane shader gains the ink coverage (`a * INK_GAIN`) so the plates'
+  // soft AA edges merge into solid black where lines overlap instead of
+  // leaving a hairline of paper between two half-coverages. Every strip is
+  // drawn at full weight and the four frame strips keep the shared `frameW`
+  // (the plane carries half a frame of margin past the composition and every
+  // perpendicular line runs the full tile width/height, so an inset frame
+  // leaves their ends poking out past the border as nubs on the edges and
+  // corners).
   const ink = '#0e0e0e';
   const base = 9 + Math.random() * 7;
   const LINE_MIN = 0.90, LINE_MAX = 1.16;
@@ -379,6 +399,14 @@ function makeGridTexture(maxAniso, v, h, frameW){
     tg.fillRect(0, h[k] * SL - w / 2, SL, w);
   }
 
+  // the fixed painting frame, alone in its map: the same four edge strips,
+  // half of each wrapping to the neighbouring repeat
+  fg.fillStyle = ink;
+  fg.fillRect(-frameW / 2, 0, frameW, SL);
+  fg.fillRect(SL - frameW / 2, 0, frameW, SL);
+  fg.fillRect(0, -frameW / 2, SL, frameW);
+  fg.fillRect(0, SL - frameW / 2, SL, frameW);
+
   const cell = new THREE.CanvasTexture(cellCv);
   cell.colorSpace = THREE.NoColorSpace; cell.anisotropy = maxAniso;
   cell.wrapS = cell.wrapT = THREE.RepeatWrapping;
@@ -387,13 +415,17 @@ function makeGridTexture(maxAniso, v, h, frameW){
   line.colorSpace = THREE.SRGBColorSpace; line.anisotropy = maxAniso;
   line.wrapS = line.wrapT = THREE.RepeatWrapping;
 
+  const frame = new THREE.CanvasTexture(frameCv);
+  frame.colorSpace = THREE.SRGBColorSpace; frame.anisotropy = maxAniso;
+  frame.wrapS = frame.wrapT = THREE.RepeatWrapping;
+
   const reveal = new THREE.CanvasTexture(revCv);
   reveal.colorSpace = THREE.NoColorSpace;
   reveal.generateMipmaps = false;
   reveal.minFilter = THREE.NearestFilter;
   reveal.magFilter = THREE.NearestFilter;
 
-  return { cell, line, reveal };
+  return { cell, line, frame, reveal };
 }
 
 /* ------------------------------------------------------------------ *
@@ -724,9 +756,13 @@ const uMaxRadius  = { value: 10 };  // half the canvas diagonal, in world units
 const uR0         = { value: 0.3 }; // radius of the original square's edge
 const uSpan       = { value: 0.42 }; // width of each cell's fade-in window
 const uFrame      = { value: 0.03 }; // half the outer frame line, in world units
+// 1 while the composition is inflated to infinity. In standard mode the plane
+// carries a half-frame margin of the *adjacent* pane's cells, which only the
+// frame ink should cover; this gates a clip so those cells cannot leak past
+// the border.
+const uFill       = { value: 0 };
 const uCellUVS    = { value: new THREE.Vector2(1, 1) };
-const uLineUVS    = { value: new THREE.Vector2(1, 1) };
-const uInk        = { value: new THREE.Color('#0e0e0e') }; // line + black-cell ink
+const uLineUVS    = { value: new THREE.Vector2(1, 1) };const uInk        = { value: new THREE.Color('#0e0e0e') }; // line + black-cell ink
 // Dark mode's negative, applied in the shaders rather than as a CSS filter on
 // the WebGL canvas: 1 = inverted. The direct path inverts at the end of the
 // plane shader (display space, where the CSS filter used to sit); the blur path
@@ -741,6 +777,10 @@ const uCapture    = { value: 0 };
 // fragment sits from the tile centre, so dragging sweeps rainbow bands through
 // the coloured cells. 0 is an exact no-op; the ink is neutral and never shifts.
 const uPrism      = { value: 0 };
+// Fixed painting frame, drawn from the frame map and faded in with the plate
+// drift: each plate carries its own frame and drifts with it, so this is the
+// copy that stays put, keeping the artwork's boundary framed as the grid moves.
+const uFrameAmt   = { value: 0 };
 // Sliding sheets: the horizontal drag is a velocity for the layers scrolling
 // past each other, a misregistered print. It scrolls the texture offsets rather
 // than the meshes — the maps wrap, so no edge can ever come into view — and the
@@ -766,10 +806,12 @@ const HALF = (SIZE / 2).toFixed(4);
 // in their own uniform objects; every other uniform is shared by all planes.
 function makePlane(slot){
   const lineMap   = { value: null };
+  const frameMap  = { value: null };
   const revealMap = { value: null };
   const cellColor = { value: new THREE.Color(COLORS[slot]) }; // paletteNow[slot]
   const cellUVO   = { value: new THREE.Vector2() };           // per plane: centring + slide
-  const lineUVO   = { value: new THREE.Vector2() };
+  const lineUVO   = { value: new THREE.Vector2() };           // ...plus drift
+  const frameUVO  = { value: new THREE.Vector2() };           // ...but drift never moves the frame
   const mat = new THREE.MeshLambertMaterial({
     alphaTest: 0.5, side: THREE.DoubleSide,
     // Premultiplied compositing on every path: the shader multiplies out by
@@ -786,6 +828,7 @@ function makePlane(slot){
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uLineMap    = lineMap;
+    shader.uniforms.uFrameMap   = frameMap;
     shader.uniforms.uRevealMap  = revealMap;
     shader.uniforms.uLineReveal = uLineReveal;
     shader.uniforms.uCellReveal = uCellReveal;
@@ -795,15 +838,18 @@ function makePlane(slot){
     shader.uniforms.uR0         = uR0;
     shader.uniforms.uSpan       = uSpan;
     shader.uniforms.uFrame      = uFrame;
+    shader.uniforms.uFill       = uFill;
     shader.uniforms.uCellUVS    = uCellUVS;    // shared scale
     shader.uniforms.uCellUVO    = cellUVO;     // per plane, so sheets can slide
     shader.uniforms.uLineUVS    = uLineUVS;
     shader.uniforms.uLineUVO    = lineUVO;
+    shader.uniforms.uFrameUVO   = frameUVO;
     shader.uniforms.uCellColor  = cellColor;
     shader.uniforms.uInk        = uInk;
     shader.uniforms.uInvert     = uInvert;
     shader.uniforms.uCapture    = uCapture;
     shader.uniforms.uPrism      = uPrism;
+    shader.uniforms.uFrameAmt   = uFrameAmt;
 
     shader.vertexShader = shader.vertexShader
       .replace('void main() {', 'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
@@ -811,23 +857,29 @@ function makePlane(slot){
 
     shader.fragmentShader = shader.fragmentShader
       .replace('void main() {',
-        'uniform sampler2D uLineMap;\nuniform sampler2D uRevealMap;\n' +
+        'uniform sampler2D uLineMap;\nuniform sampler2D uFrameMap;\nuniform sampler2D uRevealMap;\n' +
         'uniform vec2 uCellUVS;\nuniform vec2 uCellUVO;\n' +
-        'uniform vec2 uLineUVS;\nuniform vec2 uLineUVO;\n' +
-        'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\n' +
+        'uniform vec2 uLineUVS;\nuniform vec2 uLineUVO;\nuniform vec2 uFrameUVO;\n' +
+        'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\nuniform float uFrameAmt;\n' +
         'uniform float uLineReveal;\nuniform float uCellReveal;\n' +
         'uniform float uLineDir;\nuniform float uS;\n' +
-        'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\n' +
+        'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\nuniform float uFill;\n' +
         SRGB_ENCODE + '\n' +
         'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
       .replace('#include <map_fragment>', `#include <map_fragment>
   {
     vec2 uvC = vUv * uCellUVS + uCellUVO;
     vec2 uvL = vUv * uLineUVS + uLineUVO;
+    vec2 uvF = vUv * uLineUVS + uFrameUVO;
     vec4 cellT = texture2D(map, uvC);
     // the cell map is a mask: white = palette fill, black = black cell
     vec3 cellRGB = mix(uInk, uCellColor, cellT.r);
     vec4 lineT = texture2D(uLineMap, uvL);
+    // Ink coverage gain: a plate's line edges are sub-pixel soft, and where two
+    // plates' lines overlap the two half-coverages leave a hairline of paper
+    // down the middle of what should be one solid mark. INK_GAIN pushes the
+    // partial coverages up so overlaps merge instead of outlining each other.
+    lineT.a = min(1.0, lineT.a * ${INK_GAIN.toFixed(1)});
     vec4 rev = texture2D(uRevealMap, uvC);
     // where this fragment sits inside its own cell (-1..1, clamped so a cell
     // can never reach outside itself) and how far the cell's centre is from
@@ -854,9 +906,21 @@ function makePlane(slot){
     p = p * p * (3.0 - 2.0 * p);
     float grow = mix(0.22, 1.0, p);
     float covered = step(abs(local.x), grow) * step(abs(local.y), grow);
-    float cellA = insideF > 0.5 ? 1.0 : covered * p;
+    // outside infinity the plane's half-frame margin carries the next pane's
+    // cells; clip them to the composition so a frame drawn narrower than the
+    // margin cannot let a sliver of the infinite grid show past it. The mask
+    // must gate the cell's rgb as well as its alpha: this composite adds
+    // cellRGB unweighted by its own coverage, so zeroing cellA alone still
+    // leaks the colour into the frame's AA edge as a one-pixel tint.
+    float cellMask = mix(insideF, 1.0, uFill);
+    float cellA = (insideF > 0.5 ? 1.0 : covered * p) * cellMask;
     vec4 comp = vec4(lineT.rgb, lineT.a * lineA)
-              + vec4(cellRGB, cellT.a * cellA) * (1.0 - lineT.a * lineA);
+              + vec4(cellRGB * cellMask, cellT.a * cellA) * (1.0 - lineT.a * lineA);
+    // the plates' own frames live in their line maps and drift with them; this
+    // is the fixed copy, faded in with the drift so the painting stays framed
+    vec4 frameT = texture2D(uFrameMap, uvF);
+    float frameA = min(1.0, frameT.a * ${INK_GAIN.toFixed(1)}) * lineA * uFrameAmt;
+    comp = vec4(frameT.rgb * frameA, frameA) + comp * (1.0 - frameA);
     // iridescence: rotate hue about the grey axis (the ink is neutral, so the
     // black lines never shift), phased across the plane so the drag sweeps
     // rainbow bands through the composition — the bands turn with the artwork.
@@ -883,7 +947,7 @@ function makePlane(slot){
 
   const mesh = new THREE.Mesh(geo, mat);
   scene.add(mesh);
-  return { mesh, mat, lineMap, revealMap, cellColor, cellUVO, lineUVO };
+  return { mesh, mat, lineMap, frameMap, revealMap, cellColor, cellUVO, lineUVO, frameUVO };
 }
 
 const planes = [0, 1, 2].map(i => {
@@ -973,10 +1037,10 @@ const infinityBtn = document.getElementById('infinity');
 let mode = '3d';
 let infT = 0;              // seconds since infinity mode was entered
 
-// Title-click turntable: the artwork spins slowly in its own plane while the
-// focus pull sits at max; a second click eases it back to the nearest full
-// turn and releases the blur. Declared here because `reveal()` runs at boot,
-// before the interaction handlers exist.
+// Title-click turntable, infinity mode only: the artwork spins slowly in its
+// own plane while the focus pull sits at max; a second click eases it back to
+// the nearest full turn and releases the blur. Declared here because
+// `reveal()` runs at boot, before the interaction handlers exist.
 const TAU = Math.PI * 2;
 const SPIN_RATE = 6 * DEG;               // rad/s, one slow turn every ~60s
 let spinning = false, spinAngle = 0, spinRate = 0, spinGoal = null;
@@ -985,6 +1049,34 @@ function stopSpin(){
   if (!spinning) return;
   spinning = false;
   spinGoal = Math.round(spinAngle / TAU) * TAU;
+}
+
+// Outside infinity the same click toggles plate drift: each layer slides its
+// whole print — fills and gridlines together, a rigid plate — along its own
+// slow two-axis path, so the plates wander out of register and back and the
+// composition keeps re-forming. Switching it off eases every plate home.
+// Declared here because the click handler and the frame loop both need it,
+// and it sits next to the spin switch it replaces outside infinity.
+const DRIFT_CELLS = 0.18;                // peak plate displacement, in grid cells
+let drifting = false, driftAmt = 0, driftT = 0;
+let driftPaths = null;                   // per plane: {ax, ay, fx, fy, px, py}
+
+function driftRandomize(){
+  driftPaths = planes.map(() => ({
+    ax: DRIFT_CELLS * (0.65 + Math.random() * 0.35),
+    ay: DRIFT_CELLS * (0.65 + Math.random() * 0.35),
+    fx: 0.022 + Math.random() * 0.028,   // cycles / second, periods ~18-45s
+    fy: 0.022 + Math.random() * 0.028,
+    px: Math.random(), py: Math.random()
+  }));
+}
+
+function toggleDrift(){
+  if (reduceMotion) return;              // the title gradient drift is skipped too
+  drifting = !drifting;
+  // only re-roll once the plates are fully home: switching back on mid-return
+  // must resume the same path, or the displacement would jump
+  if (drifting && driftAmt === 0){ driftT = 0; driftRandomize(); }
 }
 
 // Iridescent prism and sliding sheets state, also declared up here because
@@ -996,6 +1088,12 @@ let prismDst = 0, prismCur = 0, infinityDrag = false, dragMoved = false;
 let dragY0 = 0, prismStart = 0;
 let titlePrism = -1;                     // last prism value the title was drawn with
 let sheetOffset = 0;                     // accumulated slide, world units
+// One exact repeat of both maps: the cell meta-tile is K squares across and the
+// line tile one, so the whole pattern repeats every K squares of slide. The exit
+// whizz back wraps the accumulated offset by this, so a run that has been
+// sliding for minutes cannot leave the plates hundreds of units out to crawl
+// home — after the wrap every plate starts from within K/2 squares of register.
+const SHEET_WRAP = SIZE * TILE_K;        // world units per exact map repeat
 let sheetVel = 0, sheetVelDst = 0;       // world units / second
 let sheetVelStart = 0;                   // speed at pointer-down (jog origin)
 let sheetBraking = false;                // coasting smoothly to a stop
@@ -1027,6 +1125,12 @@ function setMode(next){
   blurDst     = 0;                 // leaving infinity always returns to sharp
   prismDst    = 0;                 // ...and to true colours...
   sheetVelDst = 0;                 // ...and the sheets whizz back to register
+  // wrap to the equivalent offset nearest home first: the return speed is
+  // capped, and after a long slide the accumulated offset can be hundreds of
+  // world units out (see SHEET_WRAP). Integer multiples of the wrap are
+  // visually identical, so this cannot pop.
+  sheetOffset = ((sheetOffset + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP) % SHEET_WRAP
+              - SHEET_WRAP / 2;
   sheetReturning = true;
   stopSpin();
 }
@@ -1235,12 +1339,14 @@ function setArtworkFade(fading, fade){
 function swapIn(){
   for (const pl of planes){
     const n = pending[pl.i];
-    [pl.mat.map, pl.lineMap.value, pl.revealMap.value].forEach(t => t && t.dispose());
+    [pl.mat.map, pl.lineMap.value, pl.frameMap.value, pl.revealMap.value]
+      .forEach(t => t && t.dispose());
     pl.slot = n.slot;
     pl.depth = n.depth;
     pl.pose = n.pose;
     pl.mat.map = n.tex.cell;
     pl.lineMap.value = n.tex.line;
+    pl.frameMap.value = n.tex.frame;
     pl.revealMap.value = n.tex.reveal;
     pl.mat.needsUpdate = true;
   }
@@ -1256,7 +1362,7 @@ function swapIn(){
 function shuffle(){
   if (shufflePhase === 'out') return;      // already leaving; let it finish
   if (pending) for (const n of pending)    // a newer click replaced the queue
-    [n.tex.cell, n.tex.line, n.tex.reveal].forEach(t => t.dispose());
+    [n.tex.cell, n.tex.line, n.tex.frame, n.tex.reveal].forEach(t => t.dispose());
   pending = buildComposition();
 
   if (!planes[0].mat.map){ swapIn(); return; }   // first run: nothing to send off
@@ -1652,6 +1758,7 @@ const raycaster = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
 const _uvC = new THREE.Vector2();
 const _uvL = new THREE.Vector2();
+const _uvF = new THREE.Vector2();
 let pickReady = false;    // armed by the frame loop once the infinity fill lands
 
 // one texel from a canvas texture, mirroring the shader's uv mapping and
@@ -1676,6 +1783,9 @@ function pickAt(clientX, clientY){
     _uvC.copy(hit.uv).multiply(uCellUVS.value).add(pl.cellUVO.value);
     _uvL.copy(hit.uv).multiply(uLineUVS.value).add(pl.lineUVO.value);
     if (sampleTexel(pl.lineMap.value.image, _uvL.x, _uvL.y)[3] > 127) return { kind: 'line' };
+    // the frames sit outside the plate's drift, so they need their own sample
+    _uvF.copy(hit.uv).multiply(uLineUVS.value).add(pl.frameUVO.value);
+    if (sampleTexel(pl.frameMap.value.image, _uvF.x, _uvF.y)[3] > 127) return { kind: 'line' };
     const px = sampleTexel(pl.mat.map.image, _uvC.x, _uvC.y);
     if (px[3] > 127) return px[0] > 127 ? { kind: 'cell', plane: pl } : { kind: 'black' };
   }
@@ -1744,11 +1854,13 @@ explodeBtn.addEventListener('click', () => setMode(mode === 'split' ? 'top' : 's
 infinityBtn.addEventListener('click', toggleInfinity);
 document.getElementById('shuffle').addEventListener('click', shuffle);
 
-// The title (and its plate in infinity mode) is the focus-pull turntable
-// switch: the first click ramps the blur to max and sets the artwork spinning
-// in its own plane, the second eases it back to the nearest full turn and
-// releases the blur.
+// The title (and its plate in infinity mode) is the artwork's switch. In
+// infinity it is the focus-pull turntable: the first click ramps the blur to
+// max and sets the artwork spinning in its own plane, the second eases it back
+// to the nearest full turn and releases the blur. Outside infinity it toggles
+// plate drift instead, so the blur and spin never fire there.
 document.querySelector('.title').addEventListener('click', () => {
+  if (mode !== 'infinity'){ toggleDrift(); return; }
   if (spinning) stopSpin();
   else { spinning = true; spinGoal = null; spinRate = 0; }
   blurDst = spinning ? blurMaxPx() : 0;
@@ -1838,16 +1950,35 @@ function frame(now){
     sheetOffset += sheetVel * dt;
   }
 
+  // Plate drift: each layer slides its whole print along its own path. The
+  // displacement is in grid cells, but the two maps tile differently — the
+  // cell map K cells per UV, the line map one — so the same world movement
+  // needs a different denominator per uniform; fills and ink stay locked.
+  driftAmt += ((drifting ? 1 : 0) - driftAmt) * (1 - Math.exp(-dt * 1.3));
+  if (!drifting && driftAmt < 0.002) driftAmt = 0;
+  if (driftAmt > 0) driftT += dt;
+  // The fixed painting frame is on whenever drift is engaged outside infinity,
+  // and switches on at once: at the moment the drift starts the plates are
+  // still exactly on register, so it lands invisibly under their own frames,
+  // whereas easing it in leaves the boundary unframed for a beat as the plates
+  // move off (the fade-out-then-in the eye catches). It holds until the plates
+  // are fully home, where it again coincides with their frames, and fades
+  // across the infinity boundary, where the composition is changing anyway.
+  const frameOn = mode !== 'infinity' && (drifting || driftAmt > 0.01);
+  if (frameOn) uFrameAmt.value = 1;
+  else if (uFrameAmt.value > 0){
+    uFrameAmt.value += (0 - uFrameAmt.value) * (1 - Math.exp(-dt * 2.2));
+    if (uFrameAmt.value < 0.002) uFrameAmt.value = 0;
+  }
+
   // Turntable: spinning holds the focus pull at max and turns the artwork in
-  // its own plane (only where it faces the camera — infinity mode). Switching
-  // off eases the angle back to the nearest full turn, so it always lands on
-  // the default orientation.
-  if (spinning){
+  // its own plane — infinity mode only, where the switch is started and where
+  // the composition faces the camera. Switching off eases the angle back to
+  // the nearest full turn, so it always lands on the default orientation.
+  if (spinning && mode === 'infinity'){
     blurDst = blurMaxPx();
-    if (mode === 'infinity'){
-      spinRate += (SPIN_RATE - spinRate) * (1 - Math.exp(-dt * 1.5));
-      spinAngle += spinRate * dt;
-    }
+    spinRate += (SPIN_RATE - spinRate) * (1 - Math.exp(-dt * 1.5));
+    spinAngle += spinRate * dt;
   } else if (spinGoal !== null){
     spinRate = 0;
     spinAngle += (spinGoal - spinAngle) * (1 - Math.exp(-dt * 2.2));
@@ -1880,7 +2011,10 @@ function frame(now){
   // wrapped edge, so the ring reads as the border rather than the next square.
   const span = 1 + cur.fill * (dists.fillScale - 1) + frameW / 1024;
   uS.value = span;
-  uFrame.value = frameW / 512;       // half the frame line, in world units
+  uFill.value = cur.fill;            // gates the margin cell clip (see the shader)
+  // half the frame line, in world units — the always-drawn region matches the
+  // ink, which is drawn at full `frameW`
+  uFrame.value = frameW / 512;
 
   // Cell/line tiling. The plane shows the central `span` squares of the
   // K-square tile (so one square = SIZE world units, no zoom), centred on the
@@ -1889,14 +2023,27 @@ function frame(now){
   const lineR = span;
   uCellUVS.value.set(cellR, cellR);
   uLineUVS.value.set(lineR, lineR);
-  // Each plane's offset is the shared centring plus its own slide; both maps
-  // take the same world displacement, so fills and gridlines move together.
-  // The maps repeat, so the slide is unbounded and never shows a plane edge.
+  // Each plane's offset is the shared centring plus its own slide; a plate
+  // moves fills and gridlines by the same world distance, and the two maps
+  // tile at different scales — the cell map K cells per UV, the line map one —
+  // so the same displacement takes a different UV delta per uniform. The maps
+  // repeat, so the slide is unbounded and never shows a plane edge.
   const cellC = 0.5 - 0.5 * cellR, lineC = 0.5 - 0.5 * lineR;
   for (const pl of planes){
-    const slide = (pl.i - 1) * sheetOffset / (SIZE * TILE_K);
-    pl.cellUVO.value.set(cellC + slide, cellC);
-    pl.lineUVO.value.set(lineC + slide, lineC);
+    const slideC = (pl.i - 1) * sheetOffset / (SIZE * TILE_K);
+    const slideL = (pl.i - 1) * sheetOffset / SIZE;
+    // plate drift adds each layer's own path on top, in grid cells
+    let dx = 0, dy = 0;
+    if (driftAmt > 0 && driftPaths){
+      const d = driftPaths[pl.i];
+      dx = d.ax * driftAmt * Math.sin(TAU * (d.fx * driftT + d.px));
+      dy = d.ay * driftAmt * Math.sin(TAU * (d.fy * driftT + d.py));
+    }
+    pl.cellUVO.value.set(cellC + slideC + dx / TILE_K, cellC + dy / TILE_K);
+    pl.lineUVO.value.set(lineC + slideL + dx, lineC + dy);
+    // the pane frames ride the slide (they are part of the sheets' registration)
+    // but never the drift, so the painting stays framed while the grid moves
+    pl.frameUVO.value.set(lineC + slideL, lineC);
   }
 
   for (const pl of planes){
