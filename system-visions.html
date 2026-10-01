@@ -102,12 +102,12 @@
     transform:translateX(0);
     transition:transform .95s cubic-bezier(.22,.8,.28,1) .25s;
   }
-  /* on the flat 3D floor the artwork fills the frame, so the title wears the
-     same frosted plate as the buttons — paper enough to read over the grid,
-     and near-invisible while it slides across the paper at either end */
+  /* on the flat 3D floor the artwork fills the frame, so the title wears a
+     plate of its own. It is fully opaque on purpose: any translucency lets the
+     raking grid ghost through, and that reads as moiré; the near-paper tone
+     keeps the slide over the paper at either end of the transition quiet. */
   body.crawl .title-box{
-    background:rgba(255,255,255,.55);
-    backdrop-filter:blur(6px);
+    background:#fbf8f1;
     border:1.5px solid var(--ink);
     transform:translateX(0);
   }
@@ -1391,10 +1391,12 @@ function buildComposition(){
   });
 }
 
-// The exit dissolves the artwork, which needs real blending — the material's
-// alphaTest would otherwise cut the fade off at 50%. Toggling it costs one
-// shader variant, cached after the first shuffle.
-function setArtworkFade(fading, fade){
+// Real blending, for anything that needs a genuine alpha ramp. The shuffle's
+// exit dissolve needs it, and so do the runway's margin fills, which ramp with
+// `crawl`: under the material's alphaTest they would pop in at 50% instead of
+// fading up from nothing (and be clipped at 50% on the way out). Toggling
+// costs one shader variant, cached after the first time.
+function setBlendMode(fading){
   for (const pl of planes){
     const m = pl.mat;
     if (fading !== (m.alphaTest === 0)){
@@ -1403,8 +1405,12 @@ function setArtworkFade(fading, fade){
       m.depthWrite = !fading;      // let the layers blend rather than occlude
       m.needsUpdate = true;
     }
-    m.opacity = fade;
   }
+}
+
+function setArtworkFade(fading, fade){
+  setBlendMode(fading);
+  for (const pl of planes) pl.mat.opacity = fade;
 }
 
 // move the pending composition onto the live planes, then let it rise in
@@ -2110,6 +2116,15 @@ function frame(now){
   } else if (shufflePhase === 'in' && cur.rise < 0.02){
     shufflePhase = 'idle';
   }
+
+  // The margin cells ramp with `crawl` (and `fill`, on infinity's way out), so
+  // those transitions run in blended mode: the fills fade up from nothing as
+  // the tiling unfurls and fade back out before the upright views take over,
+  // where the alphaTest returns. The switch points sit at alphas of 0 and 1,
+  // so neither is ever seen.
+  setBlendMode(shufflePhase === 'out' ||
+               (cur.crawl > 0.002 && cur.crawl < 0.998) ||
+               (cur.fill > 0.002 && cur.fill < 0.998));
 
   applyCamera(cur);
   updateLights();
