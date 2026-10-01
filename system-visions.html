@@ -963,6 +963,7 @@ let dragY0 = 0, prismStart = 0;
 let titlePrism = -1;                     // last prism value the title was drawn with
 let sheetOffset = 0;                     // accumulated slide, world units
 let sheetVel = 0, sheetVelDst = 0;       // world units / second
+let sheetVelStart = 0;                   // speed at pointer-down (jog origin)
 let sheetBraking = false;                // coasting smoothly to a stop
 let sheetReturning = false;              // whizzing back to registration
 let dragX0 = 0;
@@ -1566,6 +1567,8 @@ dom.addEventListener('pointerdown', e => {
     dragX0 = e.clientX;
     sheetReturning = false;                          // grab the sheets again...
     sheetBraking = false;                            // ...at their current speed
+    sheetVelStart = sheetVel;                        // the jog starts from here
+    sheetVelDst = sheetVel;                          // ...so a vertical drag leaves it alone
     dom.setPointerCapture(e.pointerId);
     return;
   }
@@ -1581,10 +1584,11 @@ dom.addEventListener('pointermove', e => {
     if (dragMoved){
       prismDst = Math.min(PRISM_MAX, Math.max(-PRISM_MAX,
         prismStart + dy / (0.45 * window.innerHeight) * PRISM_MAX));
-      // the horizontal drag is the sheets' velocity: further from where you
-      // pressed slides faster, and the patterns wrap, so they never run out
-      sheetVelDst = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
-        dx / (0.40 * window.innerWidth) * SHEET_SPEED));
+      // the horizontal axis jogs the sheets' speed from wherever it already is,
+      // so a purely vertical drag (adjusting the prism) never disturbs them
+      if (Math.abs(dx) > 7)
+        sheetVelDst = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
+          sheetVelStart + dx / (0.40 * window.innerWidth) * SHEET_SPEED));
     }
     return;
   }
