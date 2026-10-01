@@ -102,6 +102,15 @@
     transform:translateX(0);
     transition:transform .95s cubic-bezier(.22,.8,.28,1) .25s;
   }
+  /* on the flat 3D floor the artwork fills the frame, so the title wears the
+     same frosted plate as the buttons — paper enough to read over the grid,
+     and near-invisible while it slides across the paper at either end */
+  body.crawl .title-box{
+    background:rgba(255,255,255,.55);
+    backdrop-filter:blur(6px);
+    border:1.5px solid var(--ink);
+    transform:translateX(0);
+  }
   /* solid ink fill; it drains away in infinity mode, leaving the gradient */
   #tg-ink{ fill:var(--ink); opacity:1; transition:opacity .55s ease }
   body.infinity #tg-ink{ opacity:0; transition:opacity 1.05s ease 1.5s }
@@ -247,6 +256,7 @@ const DEG = Math.PI / 180;
 const SIZE = 4;                               // plane edge length
 const COLORS = ['#db2b1c', '#123fa0', '#f4c518']; // red, blue, yellow
 const LIFT = 5.2;                             // entrance height, in world units
+const RUNWAY_SPAN = 15;                       // squares across the flat 3D floor
 const BLACK_CELL_CHANCE = 0.05;               // rare all-black cell (5%)
 const TILE_K = 7;                             // squares per cell tile (odd)
 const TILE_P = 256;                           // pixels per square in the cell tile
@@ -978,13 +988,18 @@ function randomPose(depth){
 //   phi     polar angle from +Y (PI/2 = facing the camera)
 //   spread  1 = grids fanned out through depth, 0 = perfectly aligned
 //   explode 1 = grids laid out side by side, flat and non-overlapping
-const VIEW3D    = { theta: 0.70, phi: 1.08, spread: 1, explode: 0 };
-const VIEWTOP   = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 0 };
-const VIEWSPLIT = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 1 };
+//   crawl   1 = grids laid flat into a floor streaming toward the horizon
+const VIEW3D    = { theta: 0.00, phi: 1.15, spread: 0, explode: 0, crawl: 1 };
+const VIEWTOP   = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 0, crawl: 0 };
+const VIEWSPLIT = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 1, crawl: 0 };
+// The old fanned 3D pose survives only as the start of the entrance conveyor:
+// the shuffle has to lift the artwork clear of the frame (see clearLift), and
+// the runway's 60-unit floor is far too big to leave that way.
+const VIEWENTRY = { theta: 0.70, phi: 1.08, spread: 1, explode: 0, crawl: 0 };
 
 const cur = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
 const dst = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
-const dists = { d3d: 12.6, dtop: 9, dsplit: 18, fillScale: 2 };
+const dists = { d3d: 12.6, dtop: 9, dsplit: 18, runway: 16, fillScale: 2 };
 
 function applyCamera(v){
   const { theta: t, phi: p, dist: d } = v;
@@ -1022,6 +1037,20 @@ function fitViews(){
   const spanX = Math.abs(ax.dx) * 2 + SIZE;
   const spanY = Math.abs(ax.dy) * 2 + SIZE;
   dists.dsplit = distToFit(spanX * 1.12, spanY * 1.12);
+
+  // Runway: a low camera over a floor that has to reach past the frame on every
+  // side. The far edge must stay above the top of frame (and the sides outside
+  // the widest corner at that distance), so the fitted distance is the tightest
+  // of those two limits, with a little margin. The floor is a fixed RUNWAY_SPAN
+  // squares wide, so this only moves with the viewport shape.
+  const e = Math.PI / 2 - VIEW3D.phi;
+  const tanTop = Math.tan(Math.max(0.05, e - camera.fov * DEG / 2));
+  const sinP = Math.sin(VIEW3D.phi), cosP = Math.cos(VIEW3D.phi);
+  const halfFloor = RUNWAY_SPAN * SIZE / 2;
+  const depthLimit = tanTop * halfFloor / Math.max(1e-4, cosP - tanTop * sinP);
+  const widthLimit = tanTop * halfFloor /
+    Math.max(1e-4, cosP * Math.tan(camera.fov * DEG / 2) * Math.max(1, camera.aspect));
+  dists.runway = Math.max(6, Math.min(depthLimit, widthLimit) * 0.9);
 
   // how much a plane must grow so its pattern reaches the viewport edges
   const visH = 2 * dists.dtop * Math.tan(camera.fov * DEG / 2);
@@ -1089,9 +1118,10 @@ let dragY0 = 0, prismStart = 0;
 let titlePrism = -1;                     // last prism value the title was drawn with
 let sheetOffset = 0;                     // accumulated slide, world units
 // One exact repeat of both maps: the cell meta-tile is K squares across and the
-// line tile one, so the whole pattern repeats every K squares of slide. The exit
-// whizz back wraps the accumulated offset by this, so a run that has been
-// sliding for minutes cannot leave the plates hundreds of units out to crawl
+// line tile one, so the whole pattern repeats every K squares of movement —
+// used by the slide along x and by the runway stream along v. The exit whizz
+// back wraps the accumulated offset by this, so a run that has been sliding or
+// streaming for minutes cannot leave the plates hundreds of units out to crawl
 // home — after the wrap every plate starts from within K/2 squares of register.
 const SHEET_WRAP = SIZE * TILE_K;        // world units per exact map repeat
 let sheetVel = 0, sheetVelDst = 0;       // world units / second
@@ -1099,6 +1129,41 @@ let sheetVelStart = 0;                   // speed at pointer-down (jog origin)
 let sheetBraking = false;                // coasting smoothly to a stop
 let sheetReturning = false;              // whizzing back to registration
 let dragX0 = 0;
+
+// Runway stream: the flat 3D floor scrolls toward the horizon while every
+// layer carries its own slow sine wobble, so the three plates shear against
+// each other instead of sliding as one rigid print. `crawlPhase` is per layer,
+// in world units along the depth (map v) axis; `crawlWob` is re-rolled with
+// every shuffle, like the drift paths. Leaving the runway whizzes every phase
+// home — SHEET_WRAP is an exact repeat of both maps, so the wrap before the
+// whizz is invisible and the return is always short.
+const LAYER_GAP = 0.02;                  // layer separation along Y when flat
+let crawlPhase = [0, 0, 0], crawlWob = null;
+let crawlT = 0;                          // wobble clock, seconds
+let crawlBase = 1.8;                     // world units / second, trimmed by the wheel
+let crawlReturning = false;              // whizzing the phase back to register
+let crawlHold = false;                   // left the runway: stay stopped until re-entry
+
+function crawlRandomize(){
+  crawlWob = planes.map(() => ({
+    a: 0.06 + Math.random() * 0.10,      // amplitude, grid cells
+    f: 0.022 + Math.random() * 0.020,    // cycles / second, periods ~22-45s
+    p: Math.random()
+  }));
+}
+
+// Wrap into [-SHEET_WRAP/2, SHEET_WRAP/2]: a shift by an integer number of
+// repeats is visually identical, so the whizz that follows is never long.
+function crawlRelease(){
+  let any = false;
+  for (let i = 0; i < 3; i++){
+    crawlPhase[i] = ((crawlPhase[i] + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP)
+                  % SHEET_WRAP - SHEET_WRAP / 2;
+    if (Math.abs(crawlPhase[i]) > 0.001) any = true;
+  }
+  crawlReturning = any;
+  crawlHold = true;
+}
 
 function updateToggleIcon(){
   // show the grid icon (i.e. "press to collapse to top") unless we are
@@ -1120,8 +1185,11 @@ function setMode(next){
   dst.phi     = src.phi;
   dst.spread  = src.spread;
   dst.explode = src.explode;
-  dst.dist    = next === '3d' ? dists.d3d : next === 'split' ? dists.dsplit : dists.dtop;
+  dst.crawl   = src.crawl;
+  dst.dist    = next === '3d' ? dists.runway : next === 'split' ? dists.dsplit : dists.dtop;
   dst.fill    = 0;
+  if (next === '3d'){ crawlReturning = false; crawlHold = false; }   // stream on
+  else crawlRelease();                                               // whizz home
   blurDst     = 0;                 // leaving infinity always returns to sharp
   prismDst    = 0;                 // ...and to true colours...
   sheetVelDst = 0;                 // ...and the sheets whizz back to register
@@ -1136,14 +1204,17 @@ function setMode(next){
 }
 
 function reveal(){
-  // Start clear of the frame in the layered 3D pose, then levitate up *while*
+  // Start clear of the frame in the layered pose, then levitate up *while*
   // rotating to face the camera and collapsing — one continuous motion. All of
-  // it happens off-screen, so the swap is never seen to jump.
-  Object.assign(cur, VIEW3D); cur.dist = dists.d3d;
+  // it happens off-screen, so the swap is never seen to jump. The entrance
+  // keeps the old fanned pose (VIEWENTRY): the runway's floor is far too big
+  // for `clearLift` to lift out of frame.
+  Object.assign(cur, VIEWENTRY); cur.dist = dists.d3d;
   cur.rise = clearLift(dists.d3d) / LIFT;
   Object.assign(dst, VIEWTOP); dst.dist = dists.dtop; dst.rise = 0;
   dst.fill = 0;
   blurDst = 0;
+  crawlRelease();     // a shuffle can start while the floor is streaming
   stopSpin();
   mode = 'top';
   document.body.classList.remove('infinity');
@@ -1165,10 +1236,11 @@ function enterInfinity(){
   updateToggleIcon();
 
   dst.theta = VIEWTOP.theta; dst.phi = VIEWTOP.phi;
-  dst.spread = 0; dst.explode = 0;
+  dst.spread = 0; dst.explode = 0; dst.crawl = 0;
   dst.dist = dists.dtop;
   dst.fill = 1;                       // pattern tiles, so this is not a zoom
   cur.fill = 1;                       // apply immediately (visually identical)
+  crawlRelease();                     // the floor unrolls on its way out
 
   uLineDir.value = Math.random() < 0.5 ? 1 : -1;   // outward or from the edges
   uLineReveal.value = 0;
@@ -1355,6 +1427,7 @@ function swapIn(){
   exitRise = 0;
   setArtworkFade(false, 1);
   applyPalette();          // the new layers pick up the current palette
+  crawlRandomize();        // ...and a fresh runway wobble
   reveal();
   shufflePhase = 'in';
 }
@@ -1366,6 +1439,7 @@ function shuffle(){
   pending = buildComposition();
 
   if (!planes[0].mat.map){ swapIn(); return; }   // first run: nothing to send off
+  if (mode === '3d') setMode('top');             // stand the floor up as it lifts away
   exitLift = clearLift(cur.dist) + LIFT * cur.rise;
   exitRise = 0;
   shuffleT = 0;
@@ -1747,6 +1821,13 @@ dom.addEventListener('wheel', e => {
     blurDst = Math.min(max, Math.max(0, blurDst - e.deltaY * 0.004 * max));
     return;
   }
+  if (cur.crawl > 0.5){
+    // the floor's pattern is infinite, so zooming would only pull the plate's
+    // edge into frame; the wheel trims the stream instead (and keeps trimming
+    // after a drag has orbited the camera off the preset)
+    crawlBase = Math.min(4.5, Math.max(0, crawlBase - e.deltaY * 0.003));
+    return;
+  }
   dst.dist = Math.min(Math.max(dst.dist * (1 + Math.sign(e.deltaY) * 0.1), 4), 60);
 }, { passive: false });
 
@@ -1882,7 +1963,7 @@ function resize(){
       rt.setSize(Math.max(1, Math.round(_dbSize.x / (2 << i))),
                  Math.max(1, Math.round(_dbSize.y / (2 << i)))));
   fitViews();
-  if (mode === '3d')            { dst.dist = cur.dist = dists.d3d; }
+  if (mode === '3d')            { dst.dist = cur.dist = dists.runway; }
   else if (mode === 'top')      { dst.dist = cur.dist = dists.dtop; }
   else if (mode === 'split')    { dst.dist = cur.dist = dists.dsplit; }
   else if (mode === 'infinity') { dst.dist = cur.dist = dists.dtop; }
@@ -1900,6 +1981,10 @@ function frame(now){
   for (const p of ['theta', 'phi', 'dist', 'spread', 'explode']) cur[p] += (dst[p] - cur[p]) * k;
   cur.rise += (dst.rise - cur.rise) * (1 - Math.exp(-dt * 1.2)); // levitation, matched to the rotation
   cur.fill += (dst.fill - cur.fill) * (1 - Math.exp(-dt * 2.2)); // inf retract
+  // the floor unfurls cinematically but collapses at the infinity retract's
+  // pace, so the tail of the tiled window passes quickly
+  cur.crawl += (dst.crawl - cur.crawl) *
+    (1 - Math.exp(-dt * (dst.crawl > cur.crawl ? 1.2 : 2.2)));
 
   // Infinity mode timeline: the lines spread first, then the cells fill in.
   if (mode === 'infinity'){
@@ -1950,6 +2035,29 @@ function frame(now){
     sheetOffset += sheetVel * dt;
   }
 
+  // Runway stream: the floor only moves while it is lying flatter than it is
+  // standing, so the phase advances with `crawl`; each layer adds its own slow
+  // sine wobble and the three shear against each other. Leaving the runway
+  // whizzes every phase home (see crawlRelease), and the wrap keeps the
+  // numbers small — an integer number of repeats is visually identical.
+  crawlT += dt;
+  if (crawlReturning){
+    let done = true;
+    for (let i = 0; i < 3; i++){
+      const speed = Math.min(14, Math.max(2.5, Math.abs(crawlPhase[i]) * 6));
+      const step = speed * dt;
+      if (Math.abs(crawlPhase[i]) <= step) crawlPhase[i] = 0;
+      else { crawlPhase[i] -= Math.sign(crawlPhase[i]) * step; done = false; }
+    }
+    if (done) crawlReturning = false;
+  } else if (!reduceMotion && !crawlHold && cur.crawl > 0.001){
+    for (let i = 0; i < 3; i++){
+      crawlPhase[i] -= cur.crawl * crawlBase * dt;   // negative = away, to the horizon
+      crawlPhase[i] = ((crawlPhase[i] + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP)
+                    % SHEET_WRAP - SHEET_WRAP / 2;
+    }
+  }
+
   // Plate drift: each layer slides its whole print along its own path. The
   // displacement is in grid cells, but the two maps tile differently — the
   // cell map K cells per UV, the line map one — so the same world movement
@@ -1964,7 +2072,10 @@ function frame(now){
   // move off (the fade-out-then-in the eye catches). It holds until the plates
   // are fully home, where it again coincides with their frames, and fades
   // across the infinity boundary, where the composition is changing anyway.
-  const frameOn = mode !== 'infinity' && (drifting || driftAmt > 0.01);
+  // The fixed frame also has no meaning on the runway floor, where every
+  // square is already framed by the tiles themselves.
+  const frameOn = mode !== 'infinity' && mode !== '3d' && cur.crawl < 0.02
+               && (drifting || driftAmt > 0.01);
   if (frameOn) uFrameAmt.value = 1;
   else if (uFrameAmt.value > 0){
     uFrameAmt.value += (0 - uFrameAmt.value) * (1 - Math.exp(-dt * 2.2));
@@ -2003,18 +2114,24 @@ function frame(now){
   applyCamera(cur);
   updateLights();
 
-  const s = cur.spread, e = cur.explode, rise = cur.rise;
+  const s = cur.spread, e = cur.explode, rise = cur.rise, crawl = cur.crawl;
   const ax = explodeAxis();
   // The plane always shows half the outer frame line past the composition's
   // edge, so the border keeps its full weight while infinity retracts (and the
   // artwork never changes size). That half line lands on the line texture's own
   // wrapped edge, so the ring reads as the border rather than the next square.
-  const span = 1 + cur.fill * (dists.fillScale - 1) + frameW / 1024;
+  const span = 1 + cur.fill * (dists.fillScale - 1)
+             + crawl * (RUNWAY_SPAN - 1) + frameW / 1024;
   uS.value = span;
-  uFill.value = cur.fill;            // gates the margin cell clip (see the shader)
+  // gates the margin cell clip (see the shader): the flat floor wants the whole
+  // grid of cells, the upright views only the central composition
+  uFill.value = Math.max(cur.fill, crawl);
   // half the frame line, in world units — the always-drawn region matches the
   // ink, which is drawn at full `frameW`
   uFrame.value = frameW / 512;
+  // the title's frosted plate follows the floor: it slides in while the plate
+  // is covering the frame and leaves only once the artwork is standing up
+  document.body.classList.toggle('crawl', crawl > 0.05);
 
   // Cell/line tiling. The plane shows the central `span` squares of the
   // K-square tile (so one square = SIZE world units, no zoom), centred on the
@@ -2039,8 +2156,16 @@ function frame(now){
       dx = d.ax * driftAmt * Math.sin(TAU * (d.fx * driftT + d.px));
       dy = d.ay * driftAmt * Math.sin(TAU * (d.fy * driftT + d.py));
     }
-    pl.cellUVO.value.set(cellC + slideC + dx / TILE_K, cellC + dy / TILE_K);
-    pl.lineUVO.value.set(lineC + slideL + dx, lineC + dy);
+    // the runway stream: shared base phase + this layer's own slow wobble,
+    // both in world units along the depth axis, both riding the same
+    // denominators as the drift so fills and ink stay locked
+    const wob = crawlWob ? crawlWob[pl.i] : null;
+    const crawlOff = crawlPhase[pl.i] + (wob
+      ? wob.a * SIZE * crawl * Math.sin(TAU * (wob.f * crawlT + wob.p)) : 0);
+    pl.cellUVO.value.set(cellC + slideC + dx / TILE_K,
+                         cellC + dy / TILE_K + crawlOff / (SIZE * TILE_K));
+    pl.lineUVO.value.set(lineC + slideL + dx,
+                         lineC + dy + crawlOff / SIZE);
     // the pane frames ride the slide (they are part of the sheets' registration)
     // but never the drift, so the painting stays framed while the grid moves
     pl.frameUVO.value.set(lineC + slideL, lineC);
@@ -2048,10 +2173,13 @@ function frame(now){
 
   for (const pl of planes){
     const off = pl.i - 1;                        // -1, 0, 1 along the layout axis
-    const flat = s * (1 - e);                    // rotation / fan amount
-    const bx = pl.pose.x * s * (1 - e) + off * ax.dx * e;
-    const by = pl.pose.y * s * (1 - e) + off * ax.dy * e;
-    const bz = pl.depth * 0.014 + pl.pose.z * flat;
+    const flat = s * (1 - e) * (1 - crawl);      // rotation / fan amount
+    const bx = pl.pose.x * s * (1 - e) * (1 - crawl) + off * ax.dx * e;
+    const by = pl.pose.y * s * (1 - e) * (1 - crawl) + off * ax.dy * e
+             // on the floor the layers are coplanar, so the order that used to
+             // live along Z has to sit along Y instead or they z-fight
+             + (pl.depth - 1) * LAYER_GAP * crawl;
+    const bz = pl.depth * 0.014 * (1 - crawl) + pl.pose.z * flat;
     // stagger the entrance a little so the grids levitate in sequence; the exit
     // floats the same lift back out. Both travel along the camera's own up axis,
     // so they leave/arrive straight up the screen whatever the view.
@@ -2060,7 +2188,10 @@ function frame(now){
       bx + _camUp.x * along,
       by + _camUp.y * along,
       bz + _camUp.z * along);
-    pl.mesh.rotation.set(pl.pose.rx * flat, pl.pose.ry * flat, pl.pose.rz * flat + spinAngle);
+    pl.mesh.rotation.set(
+      pl.pose.rx * flat - Math.PI / 2 * crawl,   // tip flat into the floor
+      pl.pose.ry * flat,
+      pl.pose.rz * flat + spinAngle);
     pl.mesh.scale.set(span, span, 1);
   }
 
