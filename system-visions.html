@@ -1582,6 +1582,11 @@ let dragging = false, lastX = 0, lastY = 0;
 let blurDst = 0, blurCur = 0;
 const blurMaxPx = () =>
   Math.min(20, Math.max(8, Math.min(window.innerWidth, window.innerHeight) * 0.024));
+// A small deadzone per drag axis in infinity, so taps and single-axis
+// adjustments stay clean: an axis only wakes past this many pixels, and the
+// excess is measured from the edge so nothing jumps when it does.
+const DRAG_DEADZONE = 10;
+const pastDeadzone = v => Math.sign(v) * Math.max(0, Math.abs(v) - DRAG_DEADZONE);
 const dom = renderer.domElement;
 
 dom.addEventListener('pointerdown', e => {
@@ -1604,15 +1609,16 @@ dom.addEventListener('pointermove', e => {
     if (mode !== 'infinity'){ infinityDrag = false; return; }
     const dy = dragY0 - e.clientY;                   // drag up = prism forward
     const dx = e.clientX - dragX0;                   // drag right = sheets slide
-    if (Math.abs(dy) > 7 || Math.abs(dx) > 7) dragMoved = true;   // a drag, not a pick
+    if (Math.abs(dy) > DRAG_DEADZONE || Math.abs(dx) > DRAG_DEADZONE) dragMoved = true;
     if (dragMoved){
+      // each axis is measured past its own deadzone, so a drag meant for one
+      // axis leaves the other exactly where it was
       prismDst = Math.min(PRISM_MAX, Math.max(-PRISM_MAX,
-        prismStart + dy / (0.45 * window.innerHeight) * PRISM_MAX));
+        prismStart + pastDeadzone(dy) / (0.45 * window.innerHeight) * PRISM_MAX));
       // the horizontal axis jogs the sheets' speed from wherever it already is,
       // so a purely vertical drag (adjusting the prism) never disturbs them
-      if (Math.abs(dx) > 7)
-        sheetVelDst = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
-          sheetVelStart + dx / (0.40 * window.innerWidth) * SHEET_SPEED));
+      sheetVelDst = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
+        sheetVelStart + pastDeadzone(dx) / (0.40 * window.innerWidth) * SHEET_SPEED));
     }
     return;
   }
