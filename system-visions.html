@@ -963,6 +963,7 @@ let dragY0 = 0, prismStart = 0;
 let titlePrism = -1;                     // last prism value the title was drawn with
 let sheetOffset = 0;                     // accumulated slide, world units
 let sheetVel = 0, sheetVelDst = 0;       // world units / second
+let sheetBraking = false;                // coasting smoothly to a stop
 let sheetReturning = false;              // whizzing back to registration
 let dragX0 = 0;
 
@@ -1563,7 +1564,8 @@ dom.addEventListener('pointerdown', e => {
     infinityDrag = true; dragMoved = false;
     dragY0 = e.clientY; prismStart = prismCur;
     dragX0 = e.clientX;
-    sheetReturning = false;                          // grab the sheets again
+    sheetReturning = false;                          // grab the sheets again...
+    sheetBraking = false;                            // ...at their current speed
     dom.setPointerCapture(e.pointerId);
     return;
   }
@@ -1594,8 +1596,8 @@ dom.addEventListener('pointermove', e => {
   mode = 'custom';
   updateToggleIcon();
 });
-// releasing keeps the prism; the sheets coast to a stop where they are
-const endDrag = () => { dragging = false; infinityDrag = false; sheetVelDst = 0; };
+// releasing keeps the prism where it is and the sheets at their set speed
+const endDrag = () => { dragging = false; infinityDrag = false; };
 dom.addEventListener('pointerup', endDrag);
 dom.addEventListener('pointercancel', endDrag);
 dom.addEventListener('wheel', e => {
@@ -1696,7 +1698,7 @@ dom.addEventListener('click', e => {
   else if (pick.kind === 'blank'){                 // absence of colour reads as clear
     resetPalette();
     prismDst = 0;                                  // ...and clears the prism...
-    sheetVelDst = 0; sheetReturning = true;        // ...and re-registers the sheets
+    sheetVelDst = 0; sheetBraking = true;          // ...and brakes the sheets where they are
   }
   else if (pick.kind === 'black') toggleDark();
 });
@@ -1782,18 +1784,23 @@ function frame(now){
     applyTitlePalette();
   }
 
-  // Sliding sheets: the drag sets a velocity; on release they coast to a stop.
-  // Leaving infinity (or a blank click) whizzes the accumulated offset back to
-  // registration at a capped speed, so a long slide still lands quickly.
+  // Sliding sheets: the horizontal drag sets a speed and the sheets keep
+  // moving at it — no decay on release, so they hold the direction and pace
+  // you set. A blank click brakes them smoothly where they are; leaving
+  // infinity whizzes the offset back to registration and stops them.
   if (sheetReturning){
     sheetVel = 0;
+    sheetBraking = false;
     const speed = Math.min(14, Math.max(2.5, Math.abs(sheetOffset) * 6));
     const step = speed * dt;
     if (Math.abs(sheetOffset) <= step){ sheetOffset = 0; sheetReturning = false; }
     else sheetOffset -= Math.sign(sheetOffset) * step;
   } else {
     if (infinityDrag) sheetVel = sheetVelDst;
-    else sheetVel += (0 - sheetVel) * (1 - Math.exp(-dt * 3));
+    else if (sheetBraking){
+      sheetVel += (0 - sheetVel) * (1 - Math.exp(-dt * 3));
+      if (Math.abs(sheetVel) < 0.02){ sheetVel = 0; sheetBraking = false; }
+    }
     sheetOffset += sheetVel * dt;
   }
 
