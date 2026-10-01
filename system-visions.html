@@ -732,6 +732,11 @@ const uInk        = { value: new THREE.Color('#0e0e0e') }; // line + black-cell 
 // plane shader (display space, where the CSS filter used to sit); the blur path
 // renders true colours into `rtScene` and inverts once in `blurMixMat`.
 const uInvert     = { value: 0 };
+// 1 while the scene is captured into `rtScene`. That target is plain RGBA8, so
+// the plane shader does the sRGB encode the canvas would otherwise get from
+// three's output include — and, with no decode on sample, the capture holds
+// exactly the bytes the canvas would.
+const uCapture    = { value: 0 };
 // Iridescent prism: a hue rotation about the grey axis, phased by how far a
 // fragment sits from the tile centre, so dragging sweeps rainbow bands through
 // the coloured cells. 0 is an exact no-op; the ink is neutral and never shifts.
@@ -741,6 +746,18 @@ const uPrism      = { value: 0 };
 // than the meshes — the maps wrap, so no edge can ever come into view — and the
 // picker reads the same offsets, so clicks follow the scrolled pattern.
 const SHEET_SPEED = 2.6;             // world units / second at a full drag
+
+// The scene capture renders into a plain RGBA8 target, so the sRGB encode the
+// canvas gets from three's output include has to happen in the shader instead
+// (see the plane patch below). 8-bit perceptual, like KWin: in linear light a
+// dark navy's green channel spans one or two codes, so the blobs would
+// posterise and shimmer as they move.
+const SRGB_ENCODE = `
+    vec3 linearToSrgb(vec3 c){
+      return mix(c * 12.92,
+                 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055,
+                 step(vec3(0.0031308), c));
+    }`;
 
 const HALF = (SIZE / 2).toFixed(4);
 
@@ -754,7 +771,17 @@ function makePlane(slot){
   const cellUVO   = { value: new THREE.Vector2() };           // per plane: centring + slide
   const lineUVO   = { value: new THREE.Vector2() };
   const mat = new THREE.MeshLambertMaterial({
-    alphaTest: 0.5, side: THREE.DoubleSide
+    alphaTest: 0.5, side: THREE.DoubleSide,
+    // Premultiplied compositing on every path: the shader multiplies out by
+    // alpha in display space (see the patch below), so the plane's own edge
+    // pixels blend with the layers behind them and the canvas as a whole is
+    // what the compositor expects. `premultipliedAlpha` stays off — that define
+    // would premultiply inside the built-in chain, where the capture target is
+    // still linear.
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+    blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneMinusSrcAlphaFactor
   });
 
   mat.onBeforeCompile = (shader) => {
@@ -775,6 +802,7 @@ function makePlane(slot){
     shader.uniforms.uCellColor  = cellColor;
     shader.uniforms.uInk        = uInk;
     shader.uniforms.uInvert     = uInvert;
+    shader.uniforms.uCapture    = uCapture;
     shader.uniforms.uPrism      = uPrism;
 
     shader.vertexShader = shader.vertexShader
@@ -786,10 +814,11 @@ function makePlane(slot){
         'uniform sampler2D uLineMap;\nuniform sampler2D uRevealMap;\n' +
         'uniform vec2 uCellUVS;\nuniform vec2 uCellUVO;\n' +
         'uniform vec2 uLineUVS;\nuniform vec2 uLineUVO;\n' +
-        'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uPrism;\n' +
+        'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\n' +
         'uniform float uLineReveal;\nuniform float uCellReveal;\n' +
         'uniform float uLineDir;\nuniform float uS;\n' +
         'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\n' +
+        SRGB_ENCODE + '\n' +
         'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
       .replace('#include <map_fragment>', `#include <map_fragment>
   {
@@ -841,10 +870,15 @@ function makePlane(slot){
     }
     diffuseColor = vec4(diffuse, opacity) * comp;
   }`)
-      // dark mode: a display-space negative, exactly where filter:invert(1)
-      // used to sit on the canvas (uInvert is 0 while rendering into rtScene)
+      // The capture target is plain RGBA8, so encode sRGB here (uCapture); on
+      // the canvas the include already did. Then the negative, in display space
+      // where filter:invert(1) used to sit, and premultiply for the compositor:
+      // both paths hold the same bytes, so the focus pull can engage or release
+      // without a step.
       .replace('#include <colorspace_fragment>', `#include <colorspace_fragment>
-  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0) - gl_FragColor.rgb, uInvert);`);
+  if (uCapture > 0.5) gl_FragColor.rgb = linearToSrgb(gl_FragColor.rgb);
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0) - gl_FragColor.rgb, uInvert);
+  gl_FragColor.rgb *= gl_FragColor.a;`);
   };
 
   const mesh = new THREE.Mesh(geo, mat);
@@ -1305,8 +1339,9 @@ const rtScene = new THREE.WebGLRenderTarget(1, 1, {
   minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
   format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false
 });
-// the scene pass must encode sRGB exactly as it would when drawing to canvas
-rtScene.texture.colorSpace = THREE.SRGBColorSpace;
+// Plain RGBA8 on purpose: the plane shader encodes sRGB itself while capturing
+// (uCapture), so sampling decodes nothing and the capture holds exactly the
+// bytes the canvas would — premultiplied display values, with no round trip.
 
 // The pyramid: half, quarter, eighth, sixteenth and thirty-second of the
 // drawbuffer. Two sets so the bracketing strengths can be crossfaded.
@@ -1348,44 +1383,31 @@ const BLUR_VERT = `
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }`;
 
-// KWin's blur is sRGB-space, and this must be too. With 8-bit intermediates in
-// linear light the shadow end collapses — a dark navy's green channel spans one
-// or two codes — so the blobs posterise and shimmer as they move. The first
-// downsample pass re-encodes the scene target and everything downstream stays
-// sRGB, so every pass quantises perceptually evenly, exactly like KWin.
-const SRGB_ENCODE = `
-    vec3 linearToSrgb(vec3 c){
-      return mix(c * 12.92,
-                 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055,
-                 step(vec3(0.0031308), c));
-    }`;
-
-// KWin's downsample: a 5-tap cross, centre weighted 4, corners at
-// halfpixel * offset. `uEncode` is set on the pass that reads the scene target,
-// which decodes to linear on sample.
+// KWin's blur is sRGB-space, and this must be too, so every pass quantises
+// perceptually evenly and the shadow end survives: a dark navy's green channel
+// spans one or two codes in linear light, and the blobs would posterise and
+// shimmer as they move. The capture holds display-space bytes (the plane shader
+// encoded them), so the chain just averages those bytes, premultiplied — the
+// same way the compositor would, and the way KWin blurs its own sRGB output.
 const blurDownMat = new THREE.ShaderMaterial({
   uniforms: {
     tDiffuse: { value: null },
     uHalfpixel: { value: new THREE.Vector2() },
-    uOffset: { value: 1 },
-    uEncode: { value: 0 }
+    uOffset: { value: 1 }
   },
   vertexShader: BLUR_VERT,
   fragmentShader: `
     uniform sampler2D tDiffuse;
     uniform vec2 uHalfpixel;
     uniform float uOffset;
-    uniform float uEncode;
     varying vec2 vUv;
-    ${SRGB_ENCODE}
     void main(){
       vec4 sum = texture2D(tDiffuse, vUv) * 4.0;
       sum += texture2D(tDiffuse, vUv - uHalfpixel * uOffset);
       sum += texture2D(tDiffuse, vUv + uHalfpixel * uOffset);
       sum += texture2D(tDiffuse, vUv + vec2(uHalfpixel.x, -uHalfpixel.y) * uOffset);
       sum += texture2D(tDiffuse, vUv - vec2(uHalfpixel.x, -uHalfpixel.y) * uOffset);
-      sum /= 8.0;
-      gl_FragColor = vec4(mix(sum.rgb, linearToSrgb(sum.rgb), uEncode), sum.a);
+      gl_FragColor = sum / 8.0;
     }`,
   depthTest: false, depthWrite: false, blending: THREE.NoBlending
 });
@@ -1423,10 +1445,12 @@ const blurUpMat = new THREE.ShaderMaterial({
 
 // The onscreen pass is KWin's ring once more, applied to each of the two
 // bracketing blur strengths and crossfaded, then faded against the sharp frame
-// so the focus pull engages and releases without a step. The blur levels hold
-// sRGB values (see `SRGB_ENCODE`), so the only conversion here is the sharp
-// sample, which decodes to linear out of the scene target and is re-encoded to
-// match. KWin's noise rides after that, in display space.
+// so the focus pull engages and releases without a step. Everything here is
+// premultiplied display bytes — the chain blurred them and the capture wrote
+// them — so partial alpha is convolved the way the compositor would, and the
+// negative is `alpha - colour`: inverting straight RGB as if it were a
+// full-coverage pixel is what used to turn every partly transparent pixel into
+// a white halo, and the whole background with it.
 const blurMixMat = new THREE.ShaderMaterial({
   uniforms: {
     tBlurA: { value: null },
@@ -1455,16 +1479,16 @@ const blurMixMat = new THREE.ShaderMaterial({
     uniform float uNoiseScale;
     uniform float uInvert;
     varying vec2 vUv;
-    ${SRGB_ENCODE}
     void main(){
       vec4 blurA = (${ringSum('tBlurA', 'uOffsetA')}) / 12.0;
       vec4 blurB = (${ringSum('tBlurB', 'uOffsetB')}) / 12.0;
       vec4 sharp = texture2D(tSharp, vUv);
-      sharp.rgb = linearToSrgb(sharp.rgb);
       vec4 col = mix(sharp, mix(blurA, blurB, uCross), uMix);
+      // noise scales with coverage so it belongs to the artwork, never to the
+      // paper showing through
       vec3 outCol = col.rgb
-                  + texture2D(tNoise, gl_FragCoord.xy * uNoiseScale).rrr * uMix;
-      gl_FragColor = vec4(mix(outCol, vec3(1.0) - outCol, uInvert), col.a);
+                  + texture2D(tNoise, gl_FragCoord.xy * uNoiseScale).rrr * uMix * col.a;
+      gl_FragColor = vec4(mix(outCol, vec3(col.a) - outCol, uInvert), col.a);
     }`,
   depthTest: false, depthWrite: false, blending: THREE.NoBlending
 });
@@ -1477,14 +1501,12 @@ const blurCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const _dbSize = new THREE.Vector2();
 
 // One full-screen pass. `halfpixel` is half a texel of the texture being read,
-// exactly as KWin computes it per pass. `encode` is only set on the pass that
-// reads the scene target, which decodes to linear on sample.
-function blurPass(mat, src, offset, dst, encode = false){
+// exactly as KWin computes it per pass.
+function blurPass(mat, src, offset, dst){
   if (mat.uniforms.tBlur) mat.uniforms.tBlur.value = src.texture;
   else if (mat.uniforms.tDiffuse) mat.uniforms.tDiffuse.value = src.texture;
   mat.uniforms.uHalfpixel.value.set(0.5 / src.width, 0.5 / src.height);
   if (mat.uniforms.uOffset) mat.uniforms.uOffset.value = offset;
-  if (mat.uniforms.uEncode) mat.uniforms.uEncode.value = encode ? 1 : 0;
   blurQuad.material = mat;
   renderer.setRenderTarget(dst);
   renderer.render(blurScene, blurCam);
@@ -1495,7 +1517,7 @@ function blurPass(mat, src, offset, dst, encode = false){
 function runBlurChain(levels, preset){
   let src = rtScene;
   for (let i = 0; i < preset.iters; i++){
-    blurPass(blurDownMat, src, preset.offset, levels[i], i === 0);
+    blurPass(blurDownMat, src, preset.offset, levels[i]);
     src = levels[i];
   }
   for (let i = preset.iters - 1; i > 0; i--)
@@ -1505,12 +1527,14 @@ function runBlurChain(levels, preset){
 function renderScene(){
   if (blurCur < 0.05){                     // sharp: draw straight to the canvas
     uInvert.value = darkOn ? 1 : 0;        // the plane shader carries the negative
+    uCapture.value = 0;                    // the include encodes sRGB for us
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
     return;
   }
   // the blur path renders true colours and inverts once, at the end
   uInvert.value = 0;
+  uCapture.value = 1;                      // plain RGBA8 capture: encode here
 
   // The drag sweeps the blur radius geometrically — a constant ratio per unit
   // of drag, which is what reads as an even scale — and the two bracketing
