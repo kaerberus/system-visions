@@ -1165,9 +1165,10 @@ function stopSpin(){
 // registration. Declared here because the wheel and click handlers and the
 // frame loop all need it.
 const PLATE_SPEED = 2.6;                 // world units / second at a full jog
-const PLATE_WHEEL = 0.008;               // speed added per unit of wheel deltaY
+const PLATE_WHEEL = 0.006;               // speed added per unit of wheel deltaY
+const PLATE_DEADZONE = 0.5;              // below this, slowing snaps to a stop
 let plateY = 0;                          // accumulated vertical offset, world units
-let plateVel = 0, plateVelDst = 0;       // world units / second
+let plateVel = 0;                        // world units / second
 let plateBraking = false;                // coasting smoothly to a stop
 let plateReturning = false;              // whizzing back to registration
 
@@ -1264,7 +1265,6 @@ function setMode(next){
               - SHEET_WRAP / 2;
   sheetReturning = true;
   // ...and the top view's vertical plates whizz home the same way
-  plateVelDst = 0;
   plateY = ((plateY + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP) % SHEET_WRAP
          - SHEET_WRAP / 2;
   plateReturning = true;
@@ -1288,7 +1288,7 @@ function reveal(){
   // the incoming composition enters registered: the swap happens off-screen,
   // so this snap is never seen (the outgoing ones floated away with their
   // own vertical offset)
-  plateY = 0; plateVel = 0; plateVelDst = 0;
+  plateY = 0; plateVel = 0;
   plateBraking = false; plateReturning = false;
   mode = 'top';
   document.body.classList.remove('infinity');
@@ -1316,7 +1316,6 @@ function enterInfinity(){
   cur.fill = 1;                       // apply immediately (visually identical)
   crawlRelease();                     // the floor unrolls on its way out
   // the infinite grid ignores the vertical plates, so whizz them home first
-  plateVelDst = 0;
   plateY = ((plateY + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP) % SHEET_WRAP
          - SHEET_WRAP / 2;
   plateReturning = true;
@@ -1931,9 +1930,15 @@ dom.addEventListener('wheel', e => {
     // you set. Each notch adds to the running speed (and reverses it).
     plateReturning = false;
     plateBraking = false;
-    plateVelDst = Math.min(PLATE_SPEED, Math.max(-PLATE_SPEED,
-      plateVelDst + e.deltaY * PLATE_WHEEL));
-    plateVel = plateVelDst;
+    const prev = plateVel;                         // jog from the speed it has
+    plateVel = Math.min(PLATE_SPEED, Math.max(-PLATE_SPEED,
+      prev + e.deltaY * PLATE_WHEEL));
+    // Slowing to a stop snaps inside the deadzone, so the wheel can always land
+    // on exactly zero: the speed cap is not a whole number of notches, so equal
+    // up/down scrolls can otherwise leave a permanent crawl. Speeding up never
+    // snaps, so a trackpad's small deltas can still build from rest.
+    if (Math.abs(plateVel) < PLATE_DEADZONE &&
+        Math.abs(plateVel) <= Math.abs(prev)) plateVel = 0;
     return;
   }
   if (cur.crawl > 0.5){
@@ -2036,7 +2041,6 @@ dom.addEventListener('click', e => {
     // the same brake as infinity's blank click, but the top view has nothing
     // to pick: a click just settles the plates where they are
     if (plateVel !== 0 || plateBraking || plateReturning){
-      plateVelDst = 0;
       plateBraking = true;
     }
     return;
