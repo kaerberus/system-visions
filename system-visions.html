@@ -791,6 +791,10 @@ const uPrism      = { value: 0 };
 // drift: each plate carries its own frame and drifts with it, so this is the
 // copy that stays put, keeping the artwork's boundary framed as the grid moves.
 const uFrameAmt   = { value: 0 };
+// Focus-pull ink: while the title switch holds the pull, the gridlines dissolve
+// after a beat and ease back when it is released. The ink is what smears
+// through the blur, so the pull takes it away. 1 = the ink as drawn, 0 = none.
+const uLineFade   = { value: 1 };
 // Sliding sheets: the horizontal drag is a velocity for the layers scrolling
 // past each other, a misregistered print. It scrolls the texture offsets rather
 // than the meshes — the maps wrap, so no edge can ever come into view — and the
@@ -860,6 +864,7 @@ function makePlane(slot){
     shader.uniforms.uCapture    = uCapture;
     shader.uniforms.uPrism      = uPrism;
     shader.uniforms.uFrameAmt   = uFrameAmt;
+    shader.uniforms.uLineFade   = uLineFade;
 
     shader.vertexShader = shader.vertexShader
       .replace('void main() {', 'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
@@ -870,7 +875,7 @@ function makePlane(slot){
         'uniform sampler2D uLineMap;\nuniform sampler2D uFrameMap;\nuniform sampler2D uRevealMap;\n' +
         'uniform vec2 uCellUVS;\nuniform vec2 uCellUVO;\n' +
         'uniform vec2 uLineUVS;\nuniform vec2 uLineUVO;\nuniform vec2 uFrameUVO;\n' +
-        'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\nuniform float uFrameAmt;\n' +
+        'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\nuniform float uFrameAmt;\nuniform float uLineFade;\n' +
         'uniform float uLineReveal;\nuniform float uCellReveal;\n' +
         'uniform float uLineDir;\nuniform float uS;\n' +
         'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\nuniform float uFill;\n' +
@@ -892,6 +897,11 @@ function makePlane(slot){
     // which works because the plates are drawn back to front, so the front
     // plate's partial edge blends over the back plate's ink (see swapIn).
     lineT.a = min(1.0, lineT.a * ${INK_GAIN.toFixed(1)});
+    // The focus pull's ink dissolve. Both the premultiplied rgb and the alpha
+    // scale together, so the grid fades to nothing instead of leaving a dark
+    // tint over the fills (see the title handler and the frame loop).
+    lineT.rgb *= uLineFade;
+    lineT.a *= uLineFade;
     vec4 rev = texture2D(uRevealMap, uvC);
     // where this fragment sits inside its own cell (-1..1, clamped so a cell
     // can never reach outside itself) and how far the cell's centre is from
@@ -930,8 +940,9 @@ function makePlane(slot){
               + vec4(cellRGB * cellMask, cellT.a * cellA) * (1.0 - lineT.a * lineA);
     // the plates' own frames live in their line maps and drift with them; this
     // is the fixed copy, faded in with the drift so the painting stays framed
+    // (and it rides the ink dissolve, or a fading grid would keep a solid frame)
     vec4 frameT = texture2D(uFrameMap, uvF);
-    float frameA = min(1.0, frameT.a * ${INK_GAIN.toFixed(1)}) * lineA * uFrameAmt;
+    float frameA = min(1.0, frameT.a * ${INK_GAIN.toFixed(1)}) * lineA * uFrameAmt * uLineFade;
     comp = vec4(frameT.rgb * frameA, frameA) + comp * (1.0 - frameA);
     // iridescence: rotate hue about the grey axis (the ink is neutral, so the
     // black lines never shift), phased across the plane so the drag sweeps
@@ -1067,6 +1078,11 @@ const explodeBtn  = document.getElementById('explode');
 const infinityBtn = document.getElementById('infinity');
 let mode = '3d';
 let infT = 0;              // seconds since infinity mode was entered
+// Focus-pull ink: once the pull has been held for LINE_FADE_DELAY the gridlines
+// dissolve over LINE_FADE_DUR; releasing the pull eases them back in. The fade
+// is driven from `spinning`, so a second title click always undoes it.
+const LINE_FADE_DELAY = 2.0, LINE_FADE_DUR = 2.0;
+let lineFadeT = 0;         // seconds the current pull has been held
 
 // Title-click turntable, infinity mode only: the artwork spins slowly in its
 // own plane while the focus pull sits at max; a second click eases it back to
@@ -1956,7 +1972,7 @@ document.getElementById('shuffle').addEventListener('click', shuffle);
 document.querySelector('.title').addEventListener('click', () => {
   if (mode !== 'infinity'){ toggleDrift(); return; }
   if (spinning) stopSpin();
-  else { spinning = true; spinGoal = null; spinRate = 0; }
+  else { spinning = true; spinGoal = null; spinRate = 0; lineFadeT = 0; }
   blurDst = spinning ? blurMaxPx() : 0;
 });
 
@@ -2007,8 +2023,20 @@ function frame(now){
     uLineReveal.value = ease(clamp01((infT - 0.45) / 1.5));
     uCellReveal.value = ease(clamp01((infT - 2.05) / 1.5));
     pickReady = infT > 3.7;   // only clickable once the fill has landed
+    // focus-pull ink: held long enough, the gridlines dissolve
+    if (spinning){
+      lineFadeT += dt;
+      uLineFade.value = 1 - Math.min(1, Math.max(0, (lineFadeT - LINE_FADE_DELAY) / LINE_FADE_DUR));
+    }
   } else {
     pickReady = false;
+  }
+  // releasing the pull (or leaving infinity) eases the ink back in. This is
+  // never a snap: the blend mode below follows this value, and the ramp keeps
+  // the lines from popping back into a sharp canvas.
+  if (!(mode === 'infinity' && spinning) && uLineFade.value < 0.999){
+    uLineFade.value += (1 - uLineFade.value) * (1 - Math.exp(-dt * 3.5));
+    if (uLineFade.value > 0.995) uLineFade.value = 1;
   }
 
   paletteTick(dt);   // palette crossfade from the last click
@@ -2124,14 +2152,15 @@ function frame(now){
     shufflePhase = 'idle';
   }
 
-  // The margin cells ramp with `crawl` (and `fill`, on infinity's way out), so
-  // those transitions run in blended mode: the fills fade up from nothing as
-  // the tiling unfurls and fade back out before the upright views take over,
-  // where the alphaTest returns. The switch points sit at alphas of 0 and 1,
-  // so neither is ever seen.
+  // Anything that ramps alpha runs in blended mode: the margin cells with
+  // `crawl` and `fill`, the shuffle dissolve, and the focus pull's ink fade.
+  // Under the alphaTest a half-faded fragment would be cut off in one frame
+  // instead of blending out, which reads as a pop. The switch points sit at
+  // alphas of 0 and 1, so none of the mode flips is ever seen.
   setBlendMode(shufflePhase === 'out' ||
                (cur.crawl > 0.002 && cur.crawl < 0.998) ||
-               (cur.fill > 0.002 && cur.fill < 0.998));
+               (cur.fill > 0.002 && cur.fill < 0.998) ||
+               uLineFade.value < 0.998);
 
   applyCamera(cur);
   updateLights();
