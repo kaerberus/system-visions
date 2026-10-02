@@ -702,11 +702,19 @@ function applyTitlePalette(){
   });
 }
 
+// One plane's colour: its palette slot's colour, rotated by its own hue scrub
+// (split mode's wheel — see `pl.hue`). An offset of 0 is the exact palette
+// colour; any multiple of 360 is visually identical.
+function planeHex(pl){
+  const c = paletteNow[pl.slot];
+  return pl.hue === 0 ? oklchToHex(c) : oklchToHex({ ...c, h: c.h + pl.hue });
+}
+
 // Single sync point for everything the palette touches: the plane colours in
 // the shader, the title's wedges/blobs and the CSS button tints.
 function applyPalette(){
   for (const pl of planes)
-    pl.cellColor.value.setStyle(oklchToHex(paletteNow[pl.slot]));
+    pl.cellColor.value.setStyle(planeHex(pl));
   const css = document.documentElement.style;
   css.setProperty('--red', oklchToHex(paletteNow[0]));
   css.setProperty('--blue', oklchToHex(paletteNow[1]));
@@ -1005,7 +1013,7 @@ function randomShift(depth){
 }
 
 const planes = [0, 1, 2].map(i => {
-  const pl = Object.assign(makePlane(i), { slot: i, i, depth: i, shift: randomShift(i) });
+  const pl = Object.assign(makePlane(i), { slot: i, i, depth: i, shift: randomShift(i), hue: 0 });
   pl.mesh.userData.plane = pl;
   return pl;
 });
@@ -1912,6 +1920,11 @@ dom.addEventListener('pointermove', e => {
 const endDrag = () => { dragging = false; infinityDrag = false; };
 dom.addEventListener('pointerup', endDrag);
 dom.addEventListener('pointercancel', endDrag);
+// Split mode's wheel scrubs the hue of the grid under the cursor (see `pl.hue`
+// and planeHex). Degrees of hue per unit of wheel deltaY, continuously; offsets
+// below the snap return to the exact palette colour.
+const HUE_WHEEL = 0.1;
+const HUE_SNAP = 0.5;
 dom.addEventListener('wheel', e => {
   e.preventDefault();
   if (mode === 'infinity'){
@@ -1939,6 +1952,21 @@ dom.addEventListener('wheel', e => {
     // snaps, so a trackpad's small deltas can still build from rest.
     if (Math.abs(plateVel) < PLATE_DEADZONE &&
         Math.abs(plateVel) <= Math.abs(prev)) plateVel = 0;
+    return;
+  }
+  if (mode === 'split'){
+    // scrolling scrubs the hue of the grid under the cursor, continuously and
+    // on top of its palette colour (see planeHex); the paper between the grids
+    // is inert — split does not zoom.
+    const pick = pickAt(e.clientX, e.clientY);
+    if (pick.plane){
+      const pl = pick.plane;
+      // accumulate around the wheel, wrapped to a small signed range; scroll
+      // back to 0 (mod 360) and the grid is its palette colour again
+      pl.hue = ((pl.hue + e.deltaY * HUE_WHEEL + 180) % 360 + 360) % 360 - 180;
+      if (Math.abs(pl.hue) < HUE_SNAP) pl.hue = 0;
+      applyPalette();
+    }
     return;
   }
   if (cur.crawl > 0.5){
@@ -1973,24 +2001,28 @@ function sampleTexel(canvas, u, v){
 // Walk the planes front to back; the first one that draws anything decides
 // what the click is. A gridline is inert ink, a black cell is the dark-mode
 // switch, a white-mask fill is a coloured cell, and a point no plane draws is
-// the background.
+// the background. A blank still carries the frontmost plane it grazed (null if
+// the ray missed every plane), so split mode can scrub the grid under the
+// cursor even over a white cell.
 function pickAt(clientX, clientY){
   const rect = dom.getBoundingClientRect();
   _ndc.set(((clientX - rect.left) / rect.width) * 2 - 1,
            -((clientY - rect.top) / rect.height) * 2 + 1);
   raycaster.setFromCamera(_ndc, camera);
+  let grazed = null;
   for (const hit of raycaster.intersectObjects(planes.map(p => p.mesh), false)){
     const pl = hit.object.userData.plane;
+    if (!grazed) grazed = pl;
     _uvC.copy(hit.uv).multiply(uCellUVS.value).add(pl.cellUVO.value);
     _uvL.copy(hit.uv).multiply(uLineUVS.value).add(pl.lineUVO.value);
-    if (sampleTexel(pl.lineMap.value.image, _uvL.x, _uvL.y)[3] > 127) return { kind: 'line' };
+    if (sampleTexel(pl.lineMap.value.image, _uvL.x, _uvL.y)[3] > 127) return { kind: 'line', plane: pl };
     // the frames sit outside the plate offset, so they need their own sample
     _uvF.copy(hit.uv).multiply(uLineUVS.value).add(pl.frameUVO.value);
-    if (sampleTexel(pl.frameMap.value.image, _uvF.x, _uvF.y)[3] > 127) return { kind: 'line' };
+    if (sampleTexel(pl.frameMap.value.image, _uvF.x, _uvF.y)[3] > 127) return { kind: 'line', plane: pl };
     const px = sampleTexel(pl.mat.map.image, _uvC.x, _uvC.y);
-    if (px[3] > 127) return px[0] > 127 ? { kind: 'cell', plane: pl } : { kind: 'black' };
+    if (px[3] > 127) return px[0] > 127 ? { kind: 'cell', plane: pl } : { kind: 'black', plane: pl };
   }
-  return { kind: 'blank' };
+  return { kind: 'blank', plane: grazed };
 }
 
 // A black cell is the one square that isn't colour, so it flips the whole
@@ -2042,6 +2074,18 @@ dom.addEventListener('click', e => {
     // to pick: a click just settles the plates where they are
     if (plateVel !== 0 || plateBraking || plateReturning){
       plateBraking = true;
+    }
+    return;
+  }
+  if (mode === 'split'){
+    // a blank (white) cell or the paper between the grids resets the whole
+    // scheme: the palette eases back to Mondrian and every grid's hue scrub
+    // clears — the blank-click reset of infinity mode, plus the scrubs
+    const pick = pickAt(e.clientX, e.clientY);
+    if (pick.kind === 'blank'){
+      resetPalette();
+      for (const pl of planes) pl.hue = 0;
+      applyPalette();
     }
     return;
   }
