@@ -1061,13 +1061,35 @@ function explodeAxis(){
   return camera.aspect >= 1 ? { dx: SIZE * 1.12, dy: 0 } : { dx: 0, dy: SIZE * 1.12 };
 }
 
+// The exploded row is fitted between the fixed HUD pieces, not the raw
+// viewport: on a phone it lays out vertically, where the title floats over the
+// top of the canvas and the controls over the bottom, so fitting to the whole
+// screen runs the top grid under the title and the bottom grid under the
+// buttons. Measure their insets and fit the row in what is left, kept centred
+// on screen like every other view (the distance eases, so the extra padding
+// animates in). On wide screens the width constraint dominates and this
+// changes nothing.
+const SPLIT_HUD_PAD = 10;                 // px of air between the row and the HUD
+
 function fitViews(){
   dists.d3d  = Math.max(12.6, distToFit(SIZE * 1.5, SIZE * 1.5));
   dists.dtop = Math.max(9.0,  distToFit(SIZE * 1.38, SIZE * 1.38));
   const ax = explodeAxis();
   const spanX = Math.abs(ax.dx) * 2 + SIZE;
   const spanY = Math.abs(ax.dy) * 2 + SIZE;
-  dists.dsplit = distToFit(spanX * 1.12, spanY * 1.12);
+  // the row may only span the band the HUD leaves free. Screen y is linear in
+  // the view-plane offset, so if the band is `bandHalf` px to each side of the
+  // centre and the row half-height is H/4 of the full font height at dist H,
+  // the distance that shrinks the row to the band is H²/4 / bandHalf times it.
+  const H = window.innerHeight;
+  const titleR = document.querySelector('.title').getBoundingClientRect();
+  const ctrlR  = document.querySelector('.controls').getBoundingClientRect();
+  const insetTop = Math.max(0, titleR.bottom) + SPLIT_HUD_PAD;
+  const insetBot = Math.max(0, H - ctrlR.top) + SPLIT_HUD_PAD;
+  const bandHalf = Math.max(H * 0.12, Math.min(H / 2 - insetTop, H / 2 - insetBot));
+  const heightD = (spanY * 1.06 / 2) * (H / 2) / bandHalf /
+                  Math.tan(camera.fov * DEG / 2);
+  dists.dsplit = Math.max(distToFit(spanX * 1.12, 0), heightD);
 
   // Runway: a low camera over a floor that has to reach past the frame on every
   // side. The far edge must stay above the top of frame (and the sides outside
