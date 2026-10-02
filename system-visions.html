@@ -257,6 +257,8 @@ const SIZE = 4;                               // plane edge length
 const COLORS = ['#db2b1c', '#123fa0', '#f4c518']; // red, blue, yellow
 const LIFT = 5.2;                             // entrance height, in world units
 const RUNWAY_SPAN = 15;                       // squares across the flat 3D floor
+const RUNWAY_HAZE = 0.6;                      // where the runway edge fade starts
+                                              // (fraction of the floor half-extent)
 const BLACK_CELL_CHANCE = 0.05;               // rare all-black cell (5%)
 const TILE_K = 7;                             // squares per cell tile (odd)
 const TILE_P = 256;                           // pixels per square in the cell tile
@@ -771,6 +773,11 @@ const uFrame      = { value: 0.03 }; // half the outer frame line, in world unit
 // frame ink should cover; this gates a clip so those cells cannot leak past
 // the border.
 const uFill       = { value: 0 };
+// 1 while the floor is lying flat (the runway), 0 elsewhere. Drives the
+// horizon haze that dissolves the print toward the paper as it approaches the
+// island's edge, so the streaming floor reads as endless instead of ending at
+// a hard square.
+const uRunway     = { value: 0 };
 const uCellUVS    = { value: new THREE.Vector2(1, 1) };
 const uLineUVS    = { value: new THREE.Vector2(1, 1) };const uInk        = { value: new THREE.Color('#0e0e0e') }; // line + black-cell ink
 // Dark mode's negative, applied in the shaders rather than as a CSS filter on
@@ -853,6 +860,7 @@ function makePlane(slot){
     shader.uniforms.uSpan       = uSpan;
     shader.uniforms.uFrame      = uFrame;
     shader.uniforms.uFill       = uFill;
+    shader.uniforms.uRunway     = uRunway;
     shader.uniforms.uCellUVS    = uCellUVS;    // shared scale
     shader.uniforms.uCellUVO    = cellUVO;     // per plane, so sheets can slide
     shader.uniforms.uLineUVS    = uLineUVS;
@@ -878,7 +886,7 @@ function makePlane(slot){
         'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\nuniform float uFrameAmt;\nuniform float uLineFade;\n' +
         'uniform float uLineReveal;\nuniform float uCellReveal;\n' +
         'uniform float uLineDir;\nuniform float uS;\n' +
-        'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\nuniform float uFill;\n' +
+        'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\nuniform float uFill;\nuniform float uRunway;\n' +
         SRGB_ENCODE + '\n' +
         'varying vec2 vUv;\nvarying vec2 vLocal;\nvoid main() {')
       .replace('#include <map_fragment>', `#include <map_fragment>
@@ -944,6 +952,13 @@ function makePlane(slot){
     vec4 frameT = texture2D(uFrameMap, uvF);
     float frameA = min(1.0, frameT.a * ${INK_GAIN.toFixed(1)}) * lineA * uFrameAmt * uLineFade;
     comp = vec4(frameT.rgb * frameA, frameA) + comp * (1.0 - frameA);
+    // Runway horizon haze: the floor is a finite square, so its print fades
+    // toward the paper as it approaches the edge — the streaming grid reads as
+    // endless instead of ending at a hard boundary. Gated by uRunway (= how
+    // flat the floor lies), and only the alpha scales: the final premultiply
+    // (rgb *= a) turns that into the right amount of ink over paper.
+    float rw = length(wFrag) / max(${HALF} * uS, 0.0001);
+    comp.a *= 1.0 - uRunway * smoothstep(${RUNWAY_HAZE.toFixed(2)}, 1.0, rw);
     // iridescence: rotate hue about the grey axis (the ink is neutral, so the
     // black lines never shift), phased across the plane so the drag sweeps
     // rainbow bands through the composition — the bands turn with the artwork.
@@ -973,23 +988,24 @@ function makePlane(slot){
   return { mesh, mat, lineMap, frameMap, revealMap, cellColor, cellUVO, lineUVO, frameUVO };
 }
 
+// Each plate enters already parallel and already sitting in its final depth
+// slot, just a little out of register; the shift slides home as it rises (see
+// reveal). Replaces the old fanned pose: a plate never rotates, so no plate's
+// edge can cut across another at an angle while it comes in.
+const ENTRY_SHIFT = 0.4;                       // world units, ~a tenth of the composition
+function randomShift(depth){
+  const rand = (a, b) => a + Math.random() * (b - a);
+  return {
+    x: (depth - 1) * ENTRY_SHIFT * rand(0.55, 1.0),   // back / middle / front
+    y: ENTRY_SHIFT * rand(-0.6, 0.6)
+  };
+}
+
 const planes = [0, 1, 2].map(i => {
-  const pl = Object.assign(makePlane(i), { slot: i, i, depth: i, pose: randomPose(i) });
+  const pl = Object.assign(makePlane(i), { slot: i, i, depth: i, shift: randomShift(i) });
   pl.mesh.userData.plane = pl;
   return pl;
 });
-
-function randomPose(depth){
-  const rand = (a, b) => a + Math.random() * (b - a);
-  return {
-    x: (depth - 1) * rand(0.30, 0.55) + rand(-0.15, 0.15),
-    y: rand(-0.5, 0.5),
-    z: (depth - 1) * 0.85,
-    rx: rand(-11, 11) * DEG,
-    ry: rand(-11, 11) * DEG,
-    rz: rand(-12, 12) * DEG
-  };
-}
 
 /* ------------------------------------------------------------------ *
  *  Camera views + smoothing
@@ -999,16 +1015,18 @@ function randomPose(depth){
 // pivots on its own centre (the world origin):
 //   theta   azimuth around the vertical (Y) axis  -> clean horizontal yaw
 //   phi     polar angle from +Y (PI/2 = facing the camera)
-//   spread  1 = grids fanned out through depth, 0 = perfectly aligned
+//   shift   1 = plates off register for the entrance, 0 = registered
 //   explode 1 = grids laid out side by side, flat and non-overlapping
 //   crawl   1 = grids laid flat into a floor streaming toward the horizon
-const VIEW3D    = { theta: 0.00, phi: 1.15, spread: 0, explode: 0, crawl: 1 };
-const VIEWTOP   = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 0, crawl: 0 };
-const VIEWSPLIT = { theta: 0.00, phi: Math.PI / 2, spread: 0, explode: 1, crawl: 0 };
-// The old fanned 3D pose survives only as the start of the entrance conveyor:
-// the shuffle has to lift the artwork clear of the frame (see clearLift), and
-// the runway's 60-unit floor is far too big to leave that way.
-const VIEWENTRY = { theta: 0.70, phi: 1.08, spread: 1, explode: 0, crawl: 0 };
+const VIEW3D    = { theta: 0.00, phi: 1.15, shift: 0, explode: 0, crawl: 1 };
+const VIEWTOP   = { theta: 0.00, phi: Math.PI / 2, shift: 0, explode: 0, crawl: 0 };
+const VIEWSPLIT = { theta: 0.00, phi: Math.PI / 2, shift: 0, explode: 1, crawl: 0 };
+// The entrance survives as this camera pose only: the shuffle has to lift the
+// artwork clear of the frame (see clearLift), and the runway's 60-unit floor is
+// far too big to leave that way. The plates themselves come in parallel and in
+// their final depth slots, only shifted in the plane (see randomShift), and the
+// camera swings from here to the top view while they rise.
+const VIEWENTRY = { theta: 0.70, phi: 1.08, shift: 1, explode: 0, crawl: 0 };
 
 const cur = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
 const dst = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
@@ -1032,8 +1050,8 @@ function distToFit(needW, needH){
 }
 
 // how far the artwork has to travel to be clear of the frame at this camera
-// distance — its own half height (plus a little for the tilt of the fanned
-// planes) and some air
+// distance — its own half height (plus a little for the entrance shift) and
+// some air
 function clearLift(dist){
   return Math.max(LIFT, dist * Math.tan(camera.fov * DEG / 2) + SIZE * 0.6 + 1.2);
 }
@@ -1201,7 +1219,7 @@ function setMode(next){
   const src = next === '3d' ? VIEW3D : next === 'split' ? VIEWSPLIT : VIEWTOP;
   dst.theta   = src.theta;
   dst.phi     = src.phi;
-  dst.spread  = src.spread;
+  dst.shift   = src.shift;
   dst.explode = src.explode;
   dst.crawl   = src.crawl;
   dst.dist    = next === '3d' ? dists.runway : next === 'split' ? dists.dsplit : dists.dtop;
@@ -1222,11 +1240,12 @@ function setMode(next){
 }
 
 function reveal(){
-  // Start clear of the frame in the layered pose, then levitate up *while*
-  // rotating to face the camera and collapsing — one continuous motion. All of
-  // it happens off-screen, so the swap is never seen to jump. The entrance
-  // keeps the old fanned pose (VIEWENTRY): the runway's floor is far too big
-  // for `clearLift` to lift out of frame.
+  // Start clear of the frame with the plates already parallel and in their
+  // final depth slots, each a little out of register, then levitate up *while*
+  // the camera swings around to face them and the shift slides home — one
+  // continuous motion, all of it off-screen, so the swap is never seen to
+  // jump. The entrance keeps VIEWENTRY as a camera pose only: the runway's
+  // floor is far too big for `clearLift` to lift out of frame.
   Object.assign(cur, VIEWENTRY); cur.dist = dists.d3d;
   cur.rise = clearLift(dists.d3d) / LIFT;
   Object.assign(dst, VIEWTOP); dst.dist = dists.dtop; dst.rise = 0;
@@ -1254,7 +1273,7 @@ function enterInfinity(){
   updateToggleIcon();
 
   dst.theta = VIEWTOP.theta; dst.phi = VIEWTOP.phi;
-  dst.spread = 0; dst.explode = 0; dst.crawl = 0;
+  dst.shift = 0; dst.explode = 0; dst.crawl = 0;
   dst.dist = dists.dtop;
   dst.fill = 1;                       // pattern tiles, so this is not a zoom
   cur.fill = 1;                       // apply immediately (visually identical)
@@ -1403,7 +1422,7 @@ function buildComposition(){
     const v = randCuts(nc, 0.07);
     const h = randCuts(nr, 0.07);
     return {
-      slot, depth, frame, pose: randomPose(depth),
+      slot, depth, frame, shift: randomShift(depth),
       tex: makeGridTexture(maxAniso, v, h, frame)
     };
   });
@@ -1439,7 +1458,7 @@ function swapIn(){
       .forEach(t => t && t.dispose());
     pl.slot = n.slot;
     pl.depth = n.depth;
-    pl.pose = n.pose;
+    pl.shift = n.shift;
     // Draw the plates back to front. Opaque objects are otherwise sorted
     // front-to-back, and a front plate's soft (gained) line edge would then
     // write depth over paper and cull the plate behind it, leaving a grey
@@ -1785,9 +1804,12 @@ function renderScene(){
 let dragging = false, lastX = 0, lastY = 0;
 // Two drags share the pointer: outside infinity it orbits the camera, inside
 // it is the iridescent prism (the camera deliberately ignores infinity mode,
-// so this input was free). The blur is no longer draggable — the title switch
-// holds it at max and the wheel trims it. The prism sticks where you leave it;
-// leaving infinity is what resets it.
+// so this input was free). The orbit itself lives on the runway only — the top
+// view and the exploded row ignore the pointer (see pointerdown), so only a
+// runway drag can set `mode = 'custom'` and the first button stays a plain
+// top <-> runway switch in the default view. The blur is no longer draggable —
+// the title switch holds it at max and the wheel trims it. The prism sticks
+// where you leave it; leaving infinity is what resets it.
 let blurDst = 0, blurCur = 0;
 const blurMaxPx = () =>
   Math.min(20, Math.max(8, Math.min(window.innerWidth, window.innerHeight) * 0.024));
@@ -1810,6 +1832,12 @@ dom.addEventListener('pointerdown', e => {
     dom.setPointerCapture(e.pointerId);
     return;
   }
+  // The orbit is for the runway, where turning the floor is the point. The
+  // top view and the exploded row have no depth to turn into and their pointer
+  // is reserved for future cursor interactions, so they ignore the drag
+  // entirely — which is also why the toggle button is the only way in and out
+  // of the runway from the default view.
+  if (mode === 'top' || mode === 'split') return;
   dragging = true; lastX = e.clientX; lastY = e.clientY;
   dom.setPointerCapture(e.pointerId);
 });
@@ -1957,6 +1985,10 @@ dom.addEventListener('click', e => {
   else if (pick.kind === 'black') toggleDark();
 });
 
+// Top <-> runway. In the default view it is a plain toggle for the runway
+// (nothing can turn the top view into 'custom' any more); split hands over to
+// the runway too, while the explode button owns the side-by-side row, and a
+// runway orbit ('custom') collapses back to the canonical top view.
 toggleBtn.addEventListener('click', () => {
   setMode((mode === 'top' || mode === 'split') ? '3d' : 'top');
 });
@@ -2007,7 +2039,7 @@ function frame(now){
   // Snappy while dragging, slow and cinematic for the automatic transitions
   const rate = dragging ? 9.0 : 1.2;
   const k = 1 - Math.exp(-dt * rate); // frame-rate independent easing
-  for (const p of ['theta', 'phi', 'dist', 'spread', 'explode']) cur[p] += (dst[p] - cur[p]) * k;
+  for (const p of ['theta', 'phi', 'dist', 'shift', 'explode']) cur[p] += (dst[p] - cur[p]) * k;
   cur.rise += (dst.rise - cur.rise) * (1 - Math.exp(-dt * 1.2)); // levitation, matched to the rotation
   cur.fill += (dst.fill - cur.fill) * (1 - Math.exp(-dt * 2.2)); // inf retract
   // the floor unfurls cinematically but collapses at the infinity retract's
@@ -2153,19 +2185,20 @@ function frame(now){
   }
 
   // Anything that ramps alpha runs in blended mode: the margin cells with
-  // `crawl` and `fill`, the shuffle dissolve, and the focus pull's ink fade.
-  // Under the alphaTest a half-faded fragment would be cut off in one frame
-  // instead of blending out, which reads as a pop. The switch points sit at
-  // alphas of 0 and 1, so none of the mode flips is ever seen.
+  // `fill`, the shuffle dissolve, the focus pull's ink fade, and the runway —
+  // which is blended for its whole stay, since the horizon haze ramps alpha at
+  // the floor's edge. Under the alphaTest a half-faded fragment would be cut
+  // off in one frame instead of blending out, which reads as a pop. The switch
+  // points sit at alphas of 0 and 1, so none of the mode flips is ever seen.
   setBlendMode(shufflePhase === 'out' ||
-               (cur.crawl > 0.002 && cur.crawl < 0.998) ||
+               cur.crawl > 0.002 ||
                (cur.fill > 0.002 && cur.fill < 0.998) ||
                uLineFade.value < 0.998);
 
   applyCamera(cur);
   updateLights();
 
-  const s = cur.spread, e = cur.explode, rise = cur.rise, crawl = cur.crawl;
+  const s = cur.shift, e = cur.explode, rise = cur.rise, crawl = cur.crawl;
   const ax = explodeAxis();
   // The plane always shows half the outer frame line past the composition's
   // edge, so the border keeps its full weight while infinity retracts (and the
@@ -2177,6 +2210,8 @@ function frame(now){
   // gates the margin cell clip (see the shader): the flat floor wants the whole
   // grid of cells, the upright views only the central composition
   uFill.value = Math.max(cur.fill, crawl);
+  // how flat the floor lies — drives the runway's horizon haze (see the shader)
+  uRunway.value = crawl;
   // half the frame line, in world units — the always-drawn region matches the
   // ink, which is drawn at full `frameW`
   uFrame.value = frameW / 512;
@@ -2224,25 +2259,33 @@ function frame(now){
 
   for (const pl of planes){
     const off = pl.i - 1;                        // -1, 0, 1 along the layout axis
-    const flat = s * (1 - e) * (1 - crawl);      // rotation / fan amount
-    const bx = pl.pose.x * s * (1 - e) * (1 - crawl) + off * ax.dx * e;
-    const by = pl.pose.y * s * (1 - e) * (1 - crawl) + off * ax.dy * e
+    // the entrance's off-register amount — the plates are already parallel, so
+    // no plate's edge can cut across another at an angle while it rises
+    const shiftAmt = s * (1 - e) * (1 - crawl);
+    const bx = pl.shift.x * shiftAmt + off * ax.dx * e;
+    const by = pl.shift.y * shiftAmt + off * ax.dy * e
              // on the floor the layers are coplanar, so the order that used to
              // live along Z has to sit along Y instead or they z-fight
              + (pl.depth - 1) * LAYER_GAP * crawl;
-    const bz = pl.depth * 0.014 * (1 - crawl) + pl.pose.z * flat;
-    // stagger the entrance a little so the grids levitate in sequence; the exit
-    // floats the same lift back out. Both travel along the camera's own up axis,
-    // so they leave/arrive straight up the screen whatever the view.
-    const along = (exitLift + pl.i * 0.9) * exitRise - (LIFT + pl.i * 0.9) * rise;
+    // the final depth slot from the very first entrance frame: the plates come
+    // in already lined up for the plane they are going to rest on
+    const bz = pl.depth * 0.014 * (1 - crawl);
+    // The whole stack floats as one rigid move along the camera's own up axis,
+    // so it leaves/arrives straight up the screen whatever the view. No
+    // per-plane stagger: the lift axis is tilted in depth, so staggering by
+    // plane index lets a plate overtake another whenever the shuffled depth
+    // order disagrees with the plane order — one grid visibly passing through
+    // another. The order is fixed by the depth slots from the first frame; the
+    // plates' individuality lives in the in-plane shift sliding home.
+    const along = exitLift * exitRise - LIFT * rise;
     pl.mesh.position.set(
       bx + _camUp.x * along,
       by + _camUp.y * along,
       bz + _camUp.z * along);
     pl.mesh.rotation.set(
-      pl.pose.rx * flat - Math.PI / 2 * crawl,   // tip flat into the floor
-      pl.pose.ry * flat,
-      pl.pose.rz * flat + spinAngle);
+      -Math.PI / 2 * crawl,                      // tip flat into the floor
+      0,
+      spinAngle);
     pl.mesh.scale.set(span, span, 1);
   }
 
