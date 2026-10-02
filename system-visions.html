@@ -76,7 +76,7 @@
   .title{
     position:absolute; top:clamp(16px,3vw,34px); left:clamp(16px,3vw,34px);
     max-width:min(54ch,72vw);
-    /* the title is the focus-pull turntable switch (see the click handler) */
+    /* the title is a focus-pull turntable switch (see the click handler) */
     pointer-events:auto; cursor:pointer;
   }
   .title h1{ position:relative; z-index:1; margin:0 }
@@ -798,7 +798,7 @@ const uPrism      = { value: 0 };
 // drift: each plate carries its own frame and drifts with it, so this is the
 // copy that stays put, keeping the artwork's boundary framed as the grid moves.
 const uFrameAmt   = { value: 0 };
-// Focus-pull ink: while the title switch holds the pull, the gridlines dissolve
+// Focus-pull ink: while the turntable holds the pull, the gridlines dissolve
 // after a beat and ease back when it is released. The ink is what smears
 // through the blur, so the pull takes it away. 1 = the ink as drawn, 0 = none.
 const uLineFade   = { value: 1 };
@@ -1102,13 +1102,27 @@ let infT = 0;              // seconds since infinity mode was entered
 const LINE_FADE_DELAY = 2.0, LINE_FADE_DUR = 2.0;
 let lineFadeT = 0;         // seconds the current pull has been held
 
-// Title-click turntable, infinity mode only: the artwork spins slowly in its
-// own plane while the focus pull sits at max; a second click eases it back to
-// the nearest full turn and releases the blur. Declared here because
-// `reveal()` runs at boot, before the interaction handlers exist.
+// Title-click / wheel-top turntable, infinity mode only: the artwork spins
+// slowly in its own plane while the focus pull sits at max; a second click (or
+// winding the wheel back down — see the wheel handler) eases it to the nearest
+// full turn and releases the blur. Declared here because `reveal()` runs at
+// boot, before the interaction handlers exist.
 const TAU = Math.PI * 2;
 const SPIN_RATE = 6 * DEG;               // rad/s, one slow turn every ~60s
 let spinning = false, spinAngle = 0, spinRate = 0, spinGoal = null;
+
+// Arm the turntable: hold the pull at max, ramp the spin from a standstill and
+// restart the ink's dissolve delay. Reached by the title click and by the wheel
+// running to the top of the pull; the same one state, so both entries look and
+// behave identically.
+function startSpin(){
+  if (spinning) return;
+  spinning = true;
+  spinGoal = null;
+  spinRate = 0;
+  lineFadeT = 0;
+  blurDst = blurMaxPx();
+}
 
 function stopSpin(){
   if (!spinning) return;
@@ -1808,8 +1822,8 @@ let dragging = false, lastX = 0, lastY = 0;
 // view and the exploded row ignore the pointer (see pointerdown), so only a
 // runway drag can set `mode = 'custom'` and the first button stays a plain
 // top <-> runway switch in the default view. The blur is no longer draggable —
-// the title switch holds it at max and the wheel trims it. The prism sticks
-// where you leave it; leaving infinity is what resets it.
+// the title switch and the wheel's top hold it at max, and the wheel trims it.
+// The prism sticks where you leave it; leaving infinity is what resets it.
 let blurDst = 0, blurCur = 0;
 const blurMaxPx = () =>
   Math.min(20, Math.max(8, Math.min(window.innerWidth, window.innerHeight) * 0.024));
@@ -1876,6 +1890,11 @@ dom.addEventListener('wheel', e => {
   if (mode === 'infinity'){
     const max = blurMaxPx();
     blurDst = Math.min(max, Math.max(0, blurDst - e.deltaY * 0.004 * max));
+    // Running the pull to the top is the same switch as a title click: hold
+    // the blur, start the turntable, dissolve the ink. Winding back down
+    // releases it again — whichever way the mode was entered.
+    if (blurDst >= max) startSpin();
+    else stopSpin();
     return;
   }
   if (cur.crawl > 0.5){
@@ -1997,15 +2016,16 @@ infinityBtn.addEventListener('click', toggleInfinity);
 document.getElementById('shuffle').addEventListener('click', shuffle);
 
 // The title (and its plate in infinity mode) is the artwork's switch. In
-// infinity it is the focus-pull turntable: the first click ramps the blur to
-// max and sets the artwork spinning in its own plane, the second eases it back
-// to the nearest full turn and releases the blur. Outside infinity it toggles
-// plate drift instead, so the blur and spin never fire there.
+// infinity it is the focus-pull turntable: a click ramps the blur to max and
+// sets the artwork spinning in its own plane, another eases it back to the
+// nearest full turn and releases the blur — and the wheel running to the top
+// of the pull arms the very same turntable (winding back down releases it).
+// Outside infinity it toggles plate drift instead, so the blur and spin never
+// fire there.
 document.querySelector('.title').addEventListener('click', () => {
   if (mode !== 'infinity'){ toggleDrift(); return; }
-  if (spinning) stopSpin();
-  else { spinning = true; spinGoal = null; spinRate = 0; lineFadeT = 0; }
-  blurDst = spinning ? blurMaxPx() : 0;
+  if (spinning){ stopSpin(); blurDst = 0; }
+  else startSpin();
 });
 
 /* ------------------------------------------------------------------ *
@@ -2074,8 +2094,9 @@ function frame(now){
   paletteTick(dt);   // palette crossfade from the last click
   titleTick(dt);     // title gradient drift
 
-  // Focus pull: eased everywhere (max while the title switch spins, trimmed by
-  // the wheel, back to sharp when infinity mode is left).
+  // Focus pull: eased everywhere (max while the turntable spins — a title
+  // click or the wheel at the top of its travel — trimmed by the wheel, back
+  // to sharp when infinity mode is left).
   blurCur += (blurDst - blurCur) * (1 - Math.exp(-dt * 1.6));
 
   // Iridescent prism: exact while the finger is down, then it stays where it
@@ -2156,9 +2177,12 @@ function frame(now){
   }
 
   // Turntable: spinning holds the focus pull at max and turns the artwork in
-  // its own plane — infinity mode only, where the switch is started and where
-  // the composition faces the camera. Switching off eases the angle back to
-  // the nearest full turn, so it always lands on the default orientation.
+  // its own plane — infinity mode only. It is armed by `startSpin()` (the
+  // title click or the wheel reaching the top of the pull) and released by
+  // `stopSpin()` (the title click or winding the wheel back down), which eases
+  // the angle to the nearest full turn so it always lands on the default
+  // orientation. The blur hold lives here so a resize can't strand it below
+  // the new max.
   if (spinning && mode === 'infinity'){
     blurDst = blurMaxPx();
     spinRate += (SPIN_RATE - spinRate) * (1 - Math.exp(-dt * 1.5));
