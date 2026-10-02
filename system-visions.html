@@ -888,7 +888,9 @@ function makePlane(slot){
     // Ink coverage gain: a plate's line edges are sub-pixel soft, and where two
     // plates' lines overlap the two half-coverages leave a hairline of paper
     // down the middle of what should be one solid mark. INK_GAIN pushes the
-    // partial coverages up so overlaps merge instead of outlining each other.
+    // partial coverages up so overlaps merge instead of outlining each other —
+    // which works because the plates are drawn back to front, so the front
+    // plate's partial edge blends over the back plate's ink (see swapIn).
     lineT.a = min(1.0, lineT.a * ${INK_GAIN.toFixed(1)});
     vec4 rev = texture2D(uRevealMap, uvC);
     // where this fragment sits inside its own cell (-1..1, clamped so a cell
@@ -1422,6 +1424,11 @@ function swapIn(){
     pl.slot = n.slot;
     pl.depth = n.depth;
     pl.pose = n.pose;
+    // Draw the plates back to front. Opaque objects are otherwise sorted
+    // front-to-back, and a front plate's soft (gained) line edge would then
+    // write depth over paper and cull the plate behind it, leaving a grey
+    // hairline where the back plate's solid ink should show through.
+    pl.mesh.renderOrder = pl.depth;
     pl.mat.map = n.tex.cell;
     pl.lineMap.value = n.tex.line;
     pl.frameMap.value = n.tex.frame;
