@@ -694,10 +694,17 @@ function applyTitlePalette(){
   // the composition's centre sits at half the prism phase, so the title takes
   // that shift and reads as part of the same rainbow
   const shift = prismCur * 0.5;
+  // the palette is one shared resource: a split-mode hue scrub lives on the
+  // plane that holds the slot, so the title resolves slots through planeHex()
+  // too and its gradient follows the grids' hues
+  const slotHex = [0, 1, 2].map(s => {
+    const pl = planes.find(p => p.slot === s);
+    return pl ? planeHex(pl) : oklchToHex(paletteNow[s]);
+  });
   TITLE.wedges.forEach((w, i) =>
-    w.setAttribute('fill', prismRotate(oklchToHex(paletteNow[TITLE.wedgeSlot[i]]), shift)));
+    w.setAttribute('fill', prismRotate(slotHex[TITLE.wedgeSlot[i]], shift)));
   TITLE.blobs.forEach((b, i) => {
-    const hex = prismRotate(oklchToHex(paletteNow[TITLE.blobSlot[i]]), shift);
+    const hex = prismRotate(slotHex[TITLE.blobSlot[i]], shift);
     for (const stop of TITLE.grads[i].children) stop.setAttribute('stop-color', hex);
   });
 }
