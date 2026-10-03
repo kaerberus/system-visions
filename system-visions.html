@@ -697,10 +697,7 @@ function applyTitlePalette(){
   // the palette is one shared resource: a split-mode hue scrub lives on the
   // plane that holds the slot, so the title resolves slots through planeHex()
   // too and its gradient follows the grids' hues
-  const slotHex = [0, 1, 2].map(s => {
-    const pl = planes.find(p => p.slot === s);
-    return pl ? planeHex(pl) : oklchToHex(paletteNow[s]);
-  });
+  const slotHex = [0, 1, 2].map(slotColor);
   TITLE.wedges.forEach((w, i) =>
     w.setAttribute('fill', prismRotate(slotHex[TITLE.wedgeSlot[i]], shift)));
   TITLE.blobs.forEach((b, i) => {
@@ -717,15 +714,23 @@ function planeHex(pl){
   return pl.hue === 0 ? oklchToHex(c) : oklchToHex({ ...c, h: c.h + pl.hue });
 }
 
+// One palette slot's current colour, resolved through the plane that holds it,
+// so a split-mode hue scrub reaches everything the palette drives: the cells,
+// the title gradient and the CSS button tints.
+function slotColor(s){
+  const pl = planes.find(p => p.slot === s);
+  return pl ? planeHex(pl) : oklchToHex(paletteNow[s]);
+}
+
 // Single sync point for everything the palette touches: the plane colours in
 // the shader, the title's wedges/blobs and the CSS button tints.
 function applyPalette(){
   for (const pl of planes)
     pl.cellColor.value.setStyle(planeHex(pl));
   const css = document.documentElement.style;
-  css.setProperty('--red', oklchToHex(paletteNow[0]));
-  css.setProperty('--blue', oklchToHex(paletteNow[1]));
-  css.setProperty('--yellow', oklchToHex(paletteNow[2]));
+  css.setProperty('--red', slotColor(0));
+  css.setProperty('--blue', slotColor(1));
+  css.setProperty('--yellow', slotColor(2));
   applyTitlePalette();
 }
 
