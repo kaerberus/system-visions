@@ -39,7 +39,7 @@
      and took a browser down under the filter-heavy dark-mode stack. The paper
      is inverted explicitly because the body background propagates to the
      viewport (filtering `body` itself would miss it), while .hud keeps the CSS
-     filter for the title and the controls. Snap, no fade — a filter transition
+     filter for the title. Snap, no fade — a filter transition
      would wash everything grey halfway. */
   body.dark{
     background-color:#101623;
@@ -122,36 +122,6 @@
     body.infinity #tg-ink{ transition-duration:.01s; transition-delay:0s }
     .veil.blink{ animation:none }
   }
-
-  .controls{
-    /* one row on phones, the original size from ~480px up. Full width, centred
-       by layout: `left:50%` would cap the row at 50vw and wrap it on phones. */
-    --btn:clamp(42px,10vw,48px);
-    position:absolute; left:0; right:0; bottom:clamp(16px,3vw,34px);
-    display:flex; flex-wrap:wrap; justify-content:center;
-  }
-  .controls button{
-    --tint:var(--ink);
-    pointer-events:auto; cursor:pointer;
-    width:var(--btn); height:var(--btn); padding:0; margin-right:clamp(6px,2vw,10px);
-    display:grid; place-items:center; overflow:hidden;
-    border:1.5px solid var(--ink); background:rgba(255,255,255,.55);
-    border-radius:0; backdrop-filter:blur(6px);
-    color:var(--tint);
-    transition:background .18s ease,color .18s ease,transform .18s ease,
-               width .42s cubic-bezier(.4,0,.2,1), opacity .3s ease,
-               margin-right .42s cubic-bezier(.4,0,.2,1), border-width .3s ease;
-  }
-  .controls button:last-child{ margin-right:0 }
-  .controls button svg{ width:calc(var(--btn) * .48); height:calc(var(--btn) * .48); display:block; flex:none }
-  #shuffle { --tint:var(--red) }
-  .controls button:hover{ background:var(--tint); color:#fbf8f1; transform:translateY(-1px) }
-  .controls button:active{ transform:translateY(0) }
-  /* infinity mode fades the remaining control away: the mode is entered by
-     scrolling up and left by scrolling down, so there is nothing to press */
-  body.infinity #shuffle{
-    width:0; opacity:0; margin-right:0; border-width:0; pointer-events:none;
-  }
 </style>
 </head>
 <body>
@@ -203,17 +173,6 @@
       </svg>
     </h1>
   </div>
-  <div class="controls">
-    <button id="shuffle" aria-label="Shuffle the composition" title="Shuffle">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
-        <path d="M3 7h3.2c1.7 0 3.3.9 4.2 2.3l3.2 5.4c.9 1.4 2.5 2.3 4.2 2.3H21"/>
-        <path d="M3 17h3.2c1.3 0 2.5-.5 3.4-1.4"/>
-        <path d="M14.2 8.4C15 7.1 16.5 7 17.8 7H21"/>
-        <path d="M18.2 4l3 3-3 3"/>
-        <path d="M18.2 14l3 3-3 3"/>
-      </svg>
-    </button>
-  </div>
 </div>
 
 <div class="veil" id="veil" aria-hidden="true"></div>
@@ -224,7 +183,6 @@
 const DEG = Math.PI / 180;
 const SIZE = 4;                               // plane edge length
 const COLORS = ['#db2b1c', '#123fa0', '#f4c518']; // red, blue, yellow
-const LIFT = 5.2;                             // entrance height, in world units
 const RUNWAY_SPAN = 15;                       // squares across the flat 3D floor
 const RUNWAY_HAZE = 0.6;                      // where the runway edge fade starts
                                               // (fraction of the floor half-extent)
@@ -977,21 +935,22 @@ function makePlane(slot){
   return { mesh, mat, lineMap, frameMap, revealMap, cellColor, cellUVO, lineUVO, frameUVO };
 }
 
-// Each plate enters already parallel and already sitting in its final depth
-// slot, just a little out of register; the shift slides home as it rises (see
-// reveal). Replaces the old fanned pose: a plate never rotates, so no plate's
-// edge can cut across another at an angle while it comes in.
-const ENTRY_SHIFT = 0.4;                       // world units, ~a tenth of the composition
-function randomShift(depth){
+// Each plate's shuffle jolt: the in-place shuffle throws the plates out along
+// these offsets, swaps their prints at the far point and settles them home.
+// Depth-correlated in x so the stack fans apart; the magnitude is the peak,
+// scaled by each plate's `joltAmt` timeline.
+const JOLT = 0.5;                              // world units at the jolt's peak
+function randomJolt(depth){
   const rand = (a, b) => a + Math.random() * (b - a);
   return {
-    x: (depth - 1) * ENTRY_SHIFT * rand(0.55, 1.0),   // back / middle / front
-    y: ENTRY_SHIFT * rand(-0.6, 0.6)
+    x: (depth - 1) * JOLT * rand(0.55, 1.0),   // back / middle / front
+    y: JOLT * rand(-0.6, 0.6)
   };
 }
 
 const planes = [0, 1, 2].map(i => {
-  const pl = Object.assign(makePlane(i), { slot: i, i, depth: i, shift: randomShift(i), hue: 0 });
+  const pl = Object.assign(makePlane(i),
+    { slot: i, i, depth: i, jolt: randomJolt(i), joltAmt: 0, stagger: 0, hue: 0 });
   pl.mesh.userData.plane = pl;
   return pl;
 });
@@ -1004,21 +963,14 @@ const planes = [0, 1, 2].map(i => {
 // pivots on its own centre (the world origin):
 //   theta   azimuth around the vertical (Y) axis  -> clean horizontal yaw
 //   phi     polar angle from +Y (PI/2 = facing the camera)
-//   shift   1 = plates off register for the entrance, 0 = registered
 //   explode 1 = grids laid out side by side, flat and non-overlapping
 //   crawl   1 = grids laid flat into a floor streaming toward the horizon
-const VIEW3D    = { theta: 0.00, phi: 1.15, shift: 0, explode: 0, crawl: 1 };
-const VIEWTOP   = { theta: 0.00, phi: Math.PI / 2, shift: 0, explode: 0, crawl: 0 };
-const VIEWSPLIT = { theta: 0.00, phi: Math.PI / 2, shift: 0, explode: 1, crawl: 0 };
-// The entrance survives as this camera pose only: the shuffle has to lift the
-// artwork clear of the frame (see clearLift), and the runway's 60-unit floor is
-// far too big to leave that way. The plates themselves come in parallel and in
-// their final depth slots, only shifted in the plane (see randomShift), and the
-// camera swings from here to the top view while they rise.
-const VIEWENTRY = { theta: 0.70, phi: 1.08, shift: 1, explode: 0, crawl: 0 };
+const VIEW3D    = { theta: 0.00, phi: 1.15, explode: 0, crawl: 1 };
+const VIEWTOP   = { theta: 0.00, phi: Math.PI / 2, explode: 0, crawl: 0 };
+const VIEWSPLIT = { theta: 0.00, phi: Math.PI / 2, explode: 1, crawl: 0 };
 
-const cur = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
-const dst = Object.assign({ dist: 12, rise: 0, fill: 0 }, VIEW3D);
+const cur = Object.assign({ dist: 12, fill: 0 }, VIEW3D);
+const dst = Object.assign({ dist: 12, fill: 0 }, VIEW3D);
 const dists = { d3d: 12.6, dtop: 9, dsplit: 18, runway: 16, fillScale: 2 };
 
 function applyCamera(v){
@@ -1038,13 +990,6 @@ function distToFit(needW, needH){
   return Math.max(needH / (2 * half), needW / (2 * half * camera.aspect));
 }
 
-// how far the artwork has to travel to be clear of the frame at this camera
-// distance — its own half height (plus a little for the entrance shift) and
-// some air
-function clearLift(dist){
-  return Math.max(LIFT, dist * Math.tan(camera.fov * DEG / 2) + SIZE * 0.6 + 1.2);
-}
-
 // side-by-side layout direction follows the viewport shape
 function explodeAxis(){
   return camera.aspect >= 1 ? { dx: SIZE * 1.12, dy: 0 } : { dx: 0, dy: SIZE * 1.12 };
@@ -1052,13 +997,12 @@ function explodeAxis(){
 
 // The exploded row is fitted between the fixed HUD pieces, not the raw
 // viewport: on a phone it lays out vertically, where the title floats over the
-// top of the canvas and the controls over the bottom, so fitting to the whole
-// screen runs the top grid under the title and the bottom grid under the
-// buttons. Measure their insets and fit the row in what is left, kept centred
-// on screen like every other view (the distance eases, so the extra padding
-// animates in). On wide screens the width constraint dominates and this
-// changes nothing.
-const SPLIT_HUD_PAD = 10;                 // px of air between the row and the HUD
+// top of the canvas, so fitting to the whole screen runs the top grid under the
+// title. Measure that inset (plus a little air) and fit the row in what is
+// left, kept centred on screen like every other view (the distance eases, so
+// the extra padding animates in). On wide screens the width constraint
+// dominates and this changes nothing.
+const SPLIT_HUD_PAD = 10;                 // px of air around the row
 
 function fitViews(){
   dists.d3d  = Math.max(12.6, distToFit(SIZE * 1.5, SIZE * 1.5));
@@ -1072,9 +1016,8 @@ function fitViews(){
   // the distance that shrinks the row to the band is H²/4 / bandHalf times it.
   const H = window.innerHeight;
   const titleR = document.querySelector('.title').getBoundingClientRect();
-  const ctrlR  = document.querySelector('.controls').getBoundingClientRect();
   const insetTop = Math.max(0, titleR.bottom) + SPLIT_HUD_PAD;
-  const insetBot = Math.max(0, H - ctrlR.top) + SPLIT_HUD_PAD;
+  const insetBot = SPLIT_HUD_PAD;
   const bandHalf = Math.max(H * 0.12, Math.min(H / 2 - insetTop, H / 2 - insetBot));
   const heightD = (spanY * 1.06 / 2) * (H / 2) / bandHalf /
                   Math.tan(camera.fov * DEG / 2);
@@ -1102,7 +1045,6 @@ function fitViews(){
   uR0.value = (SIZE * 0.5) / uMaxRadius.value;
 }
 
-const shuffleBtn = document.getElementById('shuffle');
 let mode = '3d';
 let infT = 0;              // seconds since infinity mode was entered
 // Focus-pull ink: once the pull has been held for LINE_FADE_DELAY the gridlines
@@ -1114,8 +1056,8 @@ let lineFadeT = 0;         // seconds the current pull has been held
 // Title-click / wheel-top turntable, infinity mode only: the artwork spins
 // slowly in its own plane while the focus pull sits at max; a second click (or
 // winding the wheel back down — see the wheel handler) eases it to the nearest
-// full turn and releases the blur. Declared here because `reveal()` runs at
-// boot, before the interaction handlers exist.
+// full turn and releases the blur. Declared with the view state because
+// `setMode()` stops the spin and can run at boot.
 const TAU = Math.PI * 2;
 const SPIN_RATE = 6 * DEG;               // rad/s, one slow turn every ~60s
 let spinning = false, spinAngle = 0, spinRate = 0, spinGoal = null;
@@ -1220,7 +1162,6 @@ function setMode(next){
   const src = next === '3d' ? VIEW3D : next === 'split' ? VIEWSPLIT : VIEWTOP;
   dst.theta   = src.theta;
   dst.phi     = src.phi;
-  dst.shift   = src.shift;
   dst.explode = src.explode;
   dst.crawl   = src.crawl;
   dst.dist    = next === '3d' ? dists.runway : next === 'split' ? dists.dsplit : dists.dtop;
@@ -1244,31 +1185,6 @@ function setMode(next){
   stopSpin();
 }
 
-function reveal(){
-  // Start clear of the frame with the plates already parallel and in their
-  // final depth slots, each a little out of register, then levitate up *while*
-  // the camera swings around to face them and the shift slides home — one
-  // continuous motion, all of it off-screen, so the swap is never seen to
-  // jump. The entrance keeps VIEWENTRY as a camera pose only: the runway's
-  // floor is far too big for `clearLift` to lift out of frame.
-  Object.assign(cur, VIEWENTRY); cur.dist = dists.d3d;
-  cur.rise = clearLift(dists.d3d) / LIFT;
-  Object.assign(dst, VIEWTOP); dst.dist = dists.dtop; dst.rise = 0;
-  dst.fill = 0;
-  blurDst = 0;
-  crawlRelease();     // a shuffle can start while the floor is streaming
-  stopSpin();
-  // the incoming composition enters registered: the swap happens off-screen,
-  // so this snap is never seen (the outgoing ones floated away with their
-  // own vertical offset)
-  plateY = 0; plateVel = 0;
-  plateBraking = false; plateReturning = false;
-  mode = 'top';
-  document.body.classList.remove('infinity');
-  uLineReveal.value = 1;
-  uCellReveal.value = 1;
-}
-
 // Infinity mode: the flat composition stays put while its repeating grid
 // spreads outward past the frame to the edges of the canvas — first the
 // black lines (from the centre out, or in from the edges), then the cells.
@@ -1278,7 +1194,7 @@ function enterInfinity(){
   document.body.classList.add('infinity');
 
   dst.theta = VIEWTOP.theta; dst.phi = VIEWTOP.phi;
-  dst.shift = 0; dst.explode = 0; dst.crawl = 0;
+  dst.explode = 0; dst.crawl = 0;
   dst.dist = dists.dtop;
   dst.fill = 1;                       // pattern tiles, so this is not a zoom
   cur.fill = 1;                       // apply immediately (visually identical)
@@ -1400,23 +1316,25 @@ if (document.fonts && document.fonts.ready){
 }
 
 /* ------------------------------------------------------------------ *
- *  Shuffle: a vertical conveyor
+ *  Shuffle: the plates re-form in place
  * ------------------------------------------------------------------ */
 
-// The composition on screen floats up and off the top; only then — while the
-// frame is empty, so nothing can be seen to jump — is the next one placed below
-// it, to rise into view. One composition is ever in flight, so hammering the
-// button cannot pile them up.
-let shufflePhase = 'idle';   // idle | out | in
-let shuffleT = 0;            // seconds into the exit
-let exitLift = LIFT;         // world units the exit travels
-let exitRise = 0;            // 0..1 exit progress
-let pending = null;          // next composition, built at click time
+// Clicking the artwork in the top view throws the three plates out of register,
+// dips each through the paper (its print is swapped at that invisible midpoint)
+// and settles it home — staggered back to front, so the layers re-form in
+// sequence. One shuffle runs at a time.
+const SHUFFLE_STAGGER = 0.08;              // seconds between one plate and the next
+const SHUFFLE_DUR = 0.5;                   // one plate's out-and-back
+let shufflePhase = 'idle';                 // idle | shuffle
+let shuffleT = 0;                          // seconds into the shuffle
+let shuffleSwap = [false, false, false];   // plates whose print has been swapped
+let pending = null;                        // next composition, built at click time
 
 // Build a whole new composition without showing it yet. The texture work is the
-// slow part, so it happens on the click rather than mid-transition.
+// slow part, so it happens on the click rather than mid-animation. The colour
+// selection is kept: each plate keeps its palette slot (and its hue scrub), only
+// the grid's cuts, its frame weight and the depth order are re-rolled.
 function buildComposition(){
-  const slotOrder  = shuffled([0, 1, 2]);     // which palette slot sits in which layer
   const depthOrder = shuffled([0, 1, 2]);     // which layer sits where in depth
   const frame = 9 + Math.random() * 7;
 
@@ -1429,21 +1347,20 @@ function buildComposition(){
   // can carry exactly half of it outside the composition (see the render loop)
   // and the border looks the same in every view.
   return planes.map(pl => {
-    const slot = slotOrder[pl.i];
     const depth = depthOrder[pl.i];
     const nc = 3 + Math.floor(Math.random() * 4); // 3..6 columns
     const nr = 3 + Math.floor(Math.random() * 4); // 3..6 rows
     const v = randCuts(nc, 0.07);
     const h = randCuts(nr, 0.07);
     return {
-      slot, depth, frame, shift: randomShift(depth),
+      depth, frame, jolt: randomJolt(depth),
       tex: makeGridTexture(maxAniso, v, h, frame)
     };
   });
 }
 
 // Real blending, for anything that needs a genuine alpha ramp. The shuffle's
-// exit dissolve needs it, and so do the runway's margin fills, which ramp with
+// per-plate dips need it, and so do the runway's margin fills, which ramp with
 // `crawl`: under the material's alphaTest they would pop in at 50% instead of
 // fading up from nothing (and be clipped at 50% on the way out). Toggling
 // costs one shader variant, cached after the first time.
@@ -1464,50 +1381,69 @@ function setArtworkFade(fading, fade){
   for (const pl of planes) pl.mat.opacity = fade;
 }
 
-// move the pending composition onto the live planes, then let it rise in
+// Move one pending print onto a live plane: swap its maps, depth slot and jolt
+// offset. The plate is at opacity 0 at every call site, so the swap can never
+// pop.
+function swapPlane(pl, n){
+  [pl.mat.map, pl.lineMap.value, pl.frameMap.value, pl.revealMap.value]
+    .forEach(t => t && t.dispose());
+  pl.depth = n.depth;
+  pl.jolt = n.jolt;
+  // Draw the plates back to front. Opaque objects are otherwise sorted
+  // front-to-back, and a front plate's soft (gained) line edge would then
+  // write depth over paper and cull the plate behind it, leaving a grey
+  // hairline where the back plate's solid ink should show through.
+  pl.mesh.renderOrder = pl.depth;
+  pl.mat.map = n.tex.cell;
+  pl.lineMap.value = n.tex.line;
+  pl.frameMap.value = n.tex.frame;
+  pl.revealMap.value = n.tex.reveal;
+  pl.mat.needsUpdate = true;
+}
+
+// All planes at once, no animation: the first composition at boot.
 function swapIn(){
-  for (const pl of planes){
-    const n = pending[pl.i];
-    [pl.mat.map, pl.lineMap.value, pl.frameMap.value, pl.revealMap.value]
-      .forEach(t => t && t.dispose());
-    pl.slot = n.slot;
-    pl.depth = n.depth;
-    pl.shift = n.shift;
-    // Draw the plates back to front. Opaque objects are otherwise sorted
-    // front-to-back, and a front plate's soft (gained) line edge would then
-    // write depth over paper and cull the plate behind it, leaving a grey
-    // hairline where the back plate's solid ink should show through.
-    pl.mesh.renderOrder = pl.depth;
-    pl.mat.map = n.tex.cell;
-    pl.lineMap.value = n.tex.line;
-    pl.frameMap.value = n.tex.frame;
-    pl.revealMap.value = n.tex.reveal;
-    pl.mat.needsUpdate = true;
-  }
+  for (const pl of planes) swapPlane(pl, pending[pl.i]);
   frameW = pending[0].frame;
   pending = null;
-  exitRise = 0;
-  setArtworkFade(false, 1);
-  applyPalette();          // the new layers pick up the current palette
+  applyPalette();          // the new prints pick up the current palette
   crawlRandomize();        // ...and a fresh runway wobble
-  reveal();
-  shufflePhase = 'in';
+  setArtworkFade(false, 1);
 }
 
 function shuffle(){
-  if (shufflePhase === 'out') return;      // already leaving; let it finish
-  if (pending) for (const n of pending)    // a newer click replaced the queue
-    [n.tex.cell, n.tex.line, n.tex.frame, n.tex.reveal].forEach(t => t.dispose());
+  if (shufflePhase !== 'idle') return;           // one at a time
   pending = buildComposition();
-
-  if (!planes[0].mat.map){ swapIn(); return; }   // first run: nothing to send off
-  if (mode === '3d') setMode('top');             // stand the floor up as it lifts away
-  exitLift = clearLift(cur.dist) + LIFT * cur.rise;
-  exitRise = 0;
+  if (!planes[0].mat.map){ swapIn(); return; }   // first run: nothing to animate
+  // the plates throw out toward the new print's offsets; the frame loop dips
+  // each through the paper and swaps it at the invisible midpoint, staggered
+  // back to front by the depth order they are about to take
+  for (const pl of planes){
+    pl.jolt = pending[pl.i].jolt;
+    pl.stagger = pending[pl.i].depth * SHUFFLE_STAGGER;
+  }
+  shuffleSwap = [false, false, false];
   shuffleT = 0;
-  dst.rise = cur.rise;                     // hold the entrance if it is mid-flight
-  shufflePhase = 'out';
-  setArtworkFade(true, 1);
+  shufflePhase = 'shuffle';
+  setBlendMode(true);                            // the dips need real alpha
+}
+
+// Close out the animation: any plate not yet swapped takes its print now (the
+// timeline always does this, but the guard keeps other callers safe), offsets
+// and opacities reset, and the shared bits (frame weight, runway wobble) adopt
+// the new composition.
+function finishShuffle(){
+  if (shufflePhase !== 'shuffle') return;
+  for (const pl of planes){
+    if (!shuffleSwap[pl.i]){ shuffleSwap[pl.i] = true; swapPlane(pl, pending[pl.i]); }
+    pl.joltAmt = 0;
+    pl.mat.opacity = 1;
+  }
+  frameW = pending[0].frame;
+  pending = null;
+  shufflePhase = 'idle';
+  setArtworkFade(false, 1);
+  crawlRandomize();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1539,7 +1475,7 @@ function shuffle(){
 // 5-tap cross downsample 1..5 times, then carry it back up with an 8-tap ring
 // and blend the result over the sharp frame. A handful of taps reach a much
 // wider radius than a separable Gaussian, which is where the terminal's
-// smoothness comes from. Only the WebGL canvas blurs: the title, controls and
+// smoothness comes from. Only the WebGL canvas blurs: the title, its plate and
 // grain are DOM and stay sharp. At rest the whole path is skipped and the
 // canvas draws directly with MSAA.
 
@@ -1891,6 +1827,7 @@ const HUE_WHEEL = 0.1;
 const HUE_SNAP = 0.5;
 dom.addEventListener('wheel', e => {
   e.preventDefault();
+  if (shufflePhase === 'shuffle') return;   // let the in-place shuffle finish
   // The wheel walks one hierarchy, in both directions: the held focus pull,
   // the sharp infinite lattice, the infinite runway, the framed top view and
   // the exploded row. Each scroll crosses one step; the split's downward
@@ -2031,11 +1968,9 @@ function toggleDark(){
 dom.addEventListener('click', e => {
   if (dragMoved){ dragMoved = false; return; }     // a prism drag, not a pick
   if (mode === 'top'){
-    // the same brake as infinity's blank click, but the top view has nothing
-    // to pick: a click just settles the plates where they are
-    if (plateVel !== 0 || plateBraking || plateReturning){
-      plateBraking = true;
-    }
+    // clicking the artwork shuffles it in place; the paper around it is inert.
+    // `pickAt` grazes a plane even on a blank sample, so any hit counts.
+    if (shufflePhase === 'idle' && pickAt(e.clientX, e.clientY).plane) shuffle();
     return;
   }
   if (mode === 'split'){
@@ -2060,8 +1995,6 @@ dom.addEventListener('click', e => {
   }
   else if (pick.kind === 'black') toggleDark();
 });
-
-shuffleBtn.addEventListener('click', shuffle);
 
 // The title (and its plate) is the infinity mode turntable only: a click ramps
 // the blur to max and sets the artwork spinning in its own plane, another eases
@@ -2106,8 +2039,7 @@ function frame(now){
   // Snappy while dragging, slow and cinematic for the automatic transitions
   const rate = dragging ? 9.0 : 1.2;
   const k = 1 - Math.exp(-dt * rate); // frame-rate independent easing
-  for (const p of ['theta', 'phi', 'dist', 'shift', 'explode']) cur[p] += (dst[p] - cur[p]) * k;
-  cur.rise += (dst.rise - cur.rise) * (1 - Math.exp(-dt * 1.2)); // levitation, matched to the rotation
+  for (const p of ['theta', 'phi', 'dist', 'explode']) cur[p] += (dst[p] - cur[p]) * k;
   // The tiling's retract. When the floor is unfurling (crawl rising, the
   // infinity-to-runway dive) it follows the crawl's 1.2 rate, so `fill + crawl`
   // — the cell gate below — holds at exactly 1 and the tiled pattern never
@@ -2233,7 +2165,7 @@ function frame(now){
   const platesOff = Math.abs(plateY) > 0.01 || plateVel !== 0 ||
                     plateBraking || plateReturning;
   const frameOn = mode !== 'infinity' && mode !== '3d' && cur.crawl < 0.02
-               && platesOff;
+               && (platesOff || shufflePhase === 'shuffle');
   if (frameOn) uFrameAmt.value = 1;
   else if (uFrameAmt.value > 0){
     uFrameAmt.value += (0 - uFrameAmt.value) * (1 - Math.exp(-dt * 2.2));
@@ -2257,28 +2189,42 @@ function frame(now){
     if (Math.abs(spinGoal - spinAngle) < 0.002){ spinAngle = spinGoal; spinGoal = null; }
   }
 
-  // The conveyor: float the current composition up and out of frame, then swap
-  // in the next one while the frame is empty and let it rise into place. This
-  // runs before the camera is applied, so a swap takes effect on the very frame
-  // it happens and the new composition is placed against the camera it will
-  // actually be seen with — never a stale one, never already part on screen.
-  if (shufflePhase === 'out'){
+  // In-place shuffle: each plate jogs out of register, dips through the paper
+  // (its print swaps at that invisible midpoint) and settles home — staggered
+  // so the layers re-form in sequence. The fixed frame below holds the
+  // boundary while they are off register.
+  if (shufflePhase === 'shuffle'){
     shuffleT += dt;
-    const t = Math.min(1, shuffleT / 0.7);
-    exitRise = 1 - (1 - t) * (1 - t);        // ease-out, matching the entrance pace
-    setArtworkFade(true, 1 - t);             // and dissolve on the way out
-    if (t >= 1) swapIn();
-  } else if (shufflePhase === 'in' && cur.rise < 0.02){
-    shufflePhase = 'idle';
+    let done = true;
+    for (const pl of planes){
+      const u = (shuffleT - pl.stagger) / SHUFFLE_DUR;
+      if (u < 0){ done = false; continue; }
+      if (u >= 1){ pl.joltAmt = 0; pl.mat.opacity = 1; continue; }
+      done = false;
+      if (u < 0.5){
+        const p = u * 2;
+        pl.joltAmt = p * p;                 // accelerating on the way out
+        pl.mat.opacity = 1 - p;             // ...to invisible at the swap
+      } else {
+        const p = (u - 0.5) * 2;
+        pl.joltAmt = (1 - p) * (1 - p);     // settling on the way back
+        pl.mat.opacity = p;
+      }
+      if (u >= 0.5 && !shuffleSwap[pl.i]){
+        shuffleSwap[pl.i] = true;
+        swapPlane(pl, pending[pl.i]);
+      }
+    }
+    if (done) finishShuffle();
   }
 
   // Anything that ramps alpha runs in blended mode: the margin cells with
-  // `fill`, the shuffle dissolve, the focus pull's ink fade, and the runway —
+  // `fill`, the shuffle dips, the focus pull's ink fade, and the runway —
   // which is blended for its whole stay, since the horizon haze ramps alpha at
   // the floor's edge. Under the alphaTest a half-faded fragment would be cut
   // off in one frame instead of blending out, which reads as a pop. The switch
   // points sit at alphas of 0 and 1, so none of the mode flips is ever seen.
-  setBlendMode(shufflePhase === 'out' ||
+  setBlendMode(shufflePhase === 'shuffle' ||
                cur.crawl > 0.002 ||
                (cur.fill > 0.002 && cur.fill < 0.998) ||
                uLineFade.value < 0.998);
@@ -2286,7 +2232,7 @@ function frame(now){
   applyCamera(cur);
   updateLights();
 
-  const s = cur.shift, e = cur.explode, rise = cur.rise, crawl = cur.crawl;
+  const e = cur.explode, crawl = cur.crawl;
   const ax = explodeAxis();
   // The plane always shows half the outer frame line past the composition's
   // edge, so the border keeps its full weight while infinity retracts (and the
@@ -2347,29 +2293,17 @@ function frame(now){
 
   for (const pl of planes){
     const off = pl.i - 1;                        // -1, 0, 1 along the layout axis
-    // the entrance's off-register amount — the plates are already parallel, so
-    // no plate's edge can cut across another at an angle while it rises
-    const shiftAmt = s * (1 - e) * (1 - crawl);
-    const bx = pl.shift.x * shiftAmt + off * ax.dx * e;
-    const by = pl.shift.y * shiftAmt + off * ax.dy * e
+    // the shuffle jolt throws each plate out of register along its own offset;
+    // `joltAmt` is the animation's per-plate timeline, 0 at rest
+    const bx = pl.jolt.x * pl.joltAmt + off * ax.dx * e;
+    const by = pl.jolt.y * pl.joltAmt + off * ax.dy * e
              // on the floor the layers are coplanar, so the order that used to
              // live along Z has to sit along Y instead or they z-fight
              + (pl.depth - 1) * LAYER_GAP * crawl;
-    // the final depth slot from the very first entrance frame: the plates come
-    // in already lined up for the plane they are going to rest on
+    // the plate's depth slot, already its final one (see swapPlane): the plates
+    // are always lined up for the plane they rest on
     const bz = pl.depth * 0.014 * (1 - crawl);
-    // The whole stack floats as one rigid move along the camera's own up axis,
-    // so it leaves/arrives straight up the screen whatever the view. No
-    // per-plane stagger: the lift axis is tilted in depth, so staggering by
-    // plane index lets a plate overtake another whenever the shuffled depth
-    // order disagrees with the plane order — one grid visibly passing through
-    // another. The order is fixed by the depth slots from the first frame; the
-    // plates' individuality lives in the in-plane shift sliding home.
-    const along = exitLift * exitRise - LIFT * rise;
-    pl.mesh.position.set(
-      bx + _camUp.x * along,
-      by + _camUp.y * along,
-      bz + _camUp.z * along);
+    pl.mesh.position.set(bx, by, bz);
     pl.mesh.rotation.set(
       -Math.PI / 2 * crawl,                      // tip flat into the floor
       0,
@@ -2396,10 +2330,10 @@ if (viewParam === 'infinity'){
 } else {
   // Start at the far end of the focus axis: infinity, the pull already at max
   // and the turntable spinning. Scrolling down releases the spin and the ink,
-  // sharpens to the infinite grid and then retracts it into the framed top
-  // view — the flow runs from the defocused whole to the crystallized parts.
-  // The conveyor's camera state is skipped (the swap is synchronous, before
-  // the first paint), so the page never flashes sharp.
+  // sharpens to the infinite grid, lays it into the runway and then retracts
+  // it into the framed top view — the flow runs from the defocused whole to
+  // the crystallized parts. The first composition was swapped in above, before
+  // the first paint, so the page never flashes sharp.
   enterInfinity();
   Object.assign(cur, dst);
   blurCur = blurMaxPx();
