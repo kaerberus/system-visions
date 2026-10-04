@@ -1922,9 +1922,11 @@ dom.addEventListener('wheel', e => {
   e.preventDefault();
   if (mode === 'infinity'){
     const max = blurMaxPx();
-    // The flow's downward half: winding down releases the spin and the ink,
-    // and parks at a sharp infinite grid at zero blur. One more downward
-    // scroll then retracts that grid into the framed default view.
+    // The flow's downward half: from the held pull (the boot state, or after
+    // winding up) one downward scroll releases everything and lands sharp in a
+    // single go — no intermediate blur steps. From sharp, one more downward
+    // scroll retracts the grid into the framed default view.
+    if (e.deltaY > 0 && spinning){ stopSpin(); blurDst = 0; return; }
     if (e.deltaY > 0 && blurDst === 0){ setMode('top'); return; }
     blurDst = Math.min(max, Math.max(0, blurDst - e.deltaY * 0.004 * max));
     // Running the pull to the top is the same switch as a title click: hold
