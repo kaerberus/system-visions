@@ -1921,18 +1921,17 @@ const HUE_SNAP = 0.5;
 dom.addEventListener('wheel', e => {
   e.preventDefault();
   if (mode === 'infinity'){
-    const max = blurMaxPx();
-    // The flow's downward half: from the held pull (the boot state, or after
-    // winding up) one downward scroll releases everything and lands sharp in a
-    // single go — no intermediate blur steps. From sharp, one more downward
-    // scroll retracts the grid into the framed default view.
-    if (e.deltaY > 0 && spinning){ stopSpin(); blurDst = 0; return; }
-    if (e.deltaY > 0 && blurDst === 0){ setMode('top'); return; }
-    blurDst = Math.min(max, Math.max(0, blurDst - e.deltaY * 0.004 * max));
-    // Running the pull to the top is the same switch as a title click: hold
-    // the blur, start the turntable, dissolve the ink.
-    if (blurDst >= max) startSpin();
-    else stopSpin();
+    // The pull has two states — sharp (the revealed infinite grid) and held
+    // (max blur + spin) — and the wheel crosses between them a scroll at a
+    // time: up from sharp arms the pull in one go, down from held releases it
+    // to sharp in one go, and one more down from sharp retracts the grid into
+    // the framed default view.
+    if (e.deltaY > 0){
+      if (spinning){ stopSpin(); blurDst = 0; }
+      else setMode('top');
+      return;
+    }
+    if (e.deltaY < 0 && !spinning) startSpin();
     return;
   }
   if (mode === 'top'){
