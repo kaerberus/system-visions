@@ -94,32 +94,13 @@
     font-family:'Barlow Condensed','Archivo Narrow',"Helvetica Neue",Arial,sans-serif;
     font-size:54px; font-weight:300; letter-spacing:-.01em;
   }
-  /* black plate behind the title; slides in from off the left in infinity mode */
+  /* black plate behind the title, always on: it carries the gradient letters
+     over any artwork, in every mode */
   .title-box{
     position:absolute; z-index:0; top:-14px; bottom:-14px; left:-18px; right:-18px;
     background:var(--ink);
-    transform:translateX(calc(-100% - 60px));
-    transition:transform .7s cubic-bezier(.22,.8,.28,1);
   }
-  body.infinity .title-box{
-    transform:translateX(0);
-    transition:transform .95s cubic-bezier(.22,.8,.28,1) .25s;
-  }
-  /* on the flat 3D floor the artwork fills the frame, so the title wears a
-     plate of its own. It is fully opaque on purpose: any translucency lets the
-     raking grid ghost through, and that reads as moiré; the near-paper tone
-     keeps the slide over the paper at either end of the transition quiet. */
-  body.crawl .title-box{
-    background:#fbf8f1;
-    border:1.5px solid var(--ink);
-    transform:translateX(0);
-  }
-  /* solid ink fill; it drains away in infinity mode, leaving the gradient */
-  #tg-ink{ fill:var(--ink); opacity:1; transition:opacity .55s ease }
-  body.infinity #tg-ink{ opacity:0; transition:opacity 1.05s ease 1.5s }
   @media (prefers-reduced-motion:reduce){
-    .title-box, body.infinity .title-box{ transition:none }
-    body.infinity #tg-ink{ transition-duration:.01s; transition-delay:0s }
     .veil.blink{ animation:none }
   }
 </style>
@@ -168,7 +149,6 @@
             <circle id="tg-b2" cx="140" cy="70" r="70" fill="url(#tg-g2)"/>
             <circle id="tg-b3" cx="100" cy="100" r="70" fill="url(#tg-g3)"/>
           </g>
-          <rect id="tg-ink" x="-60" y="-60" width="320" height="240"/>
         </g>
       </svg>
     </h1>
@@ -1288,8 +1268,8 @@ function titleRandomize(){
 }
 
 function titleTick(dt){
-  // the gradient only drifts while infinity mode is on
-  if (mode === 'infinity' && TITLE.fx && !reduceMotion){
+  // the gradient drifts in every mode; the title now always wears its plate
+  if (TITLE.fx && !reduceMotion){
     const fx = TITLE.fx;
     fx.t += dt;
     TITLE.pie.setAttribute('transform', `rotate(${(fx.a0 + fx.spin * fx.t) % 360} 100 54)`);
@@ -2344,16 +2324,11 @@ if (viewParam === 'infinity'){
   settleFill();
   lineFadeT = LINE_FADE_DELAY + LINE_FADE_DUR;
   uLineFade.value = 0;
-  // the title is part of the settled state too: its plate slide and ink drain
-  // jump straight to the infinity look for this first frame only. The forced
-  // reflow makes the browser compute that style with the transitions already
-  // off, so they never start; clearing the inline override afterwards only
-  // changes the transition property back, which animates nothing.
-  const titleEls = [document.querySelector('.title-box'), document.getElementById('tg-ink')];
-  for (const el of titleEls) el.style.transition = 'none';
-  void titleEls[0].offsetWidth;
-  requestAnimationFrame(() => { for (const el of titleEls) el.style.transition = ''; });
 }
+
+// the title gradient is a permanent fixture now; the debug boots that never
+// engage infinity still need it randomised once
+if (!TITLE.fx) titleRandomize();
 
 requestAnimationFrame(frame);
 </script>
