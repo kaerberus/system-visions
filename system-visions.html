@@ -87,17 +87,31 @@
   .title-svg{
     display:block; width:auto; height:clamp(78px,11vw,149px); aspect-ratio:200/108;
     overflow:visible;
-    transition:opacity .9s cubic-bezier(.4,0,.2,1),
-               transform .9s cubic-bezier(.4,0,.2,1);   /* the hover swap */
   }
-  /* the harvest label is a second copy of the same clipped gradient (reused
-     through <use>); the two crossfade and lift past each other on hover */
+  /* The hover swap is a two-beat handover, never a crossfade: hovering lifts
+     the name out (.5s), holds the plate empty for a beat, then raises the
+     harvest label (.6s, delayed .7s). Leaving runs the same mirrored — the
+     base rules carry the return delays. */
+  .title-main{
+    transition:transform .6s cubic-bezier(.4,0,.2,1) .7s,
+               opacity .6s cubic-bezier(.4,0,.2,1) .7s;
+  }
   .title-alt{
     position:absolute; top:0; left:0;
     opacity:0; transform:translateY(-9px); pointer-events:none;
+    transition:transform .5s cubic-bezier(.4,0,.2,1),
+               opacity .5s cubic-bezier(.4,0,.2,1);
   }
-  .title:hover .title-main{ opacity:0; transform:translateY(9px) }
-  .title:hover .title-alt{ opacity:1; transform:none }
+  .title:hover .title-main{
+    opacity:0; transform:translateY(9px);
+    transition:transform .5s cubic-bezier(.4,0,.2,1),
+               opacity .5s cubic-bezier(.4,0,.2,1);
+  }
+  .title:hover .title-alt{
+    opacity:1; transform:none;
+    transition:transform .6s cubic-bezier(.4,0,.2,1) .7s,
+               opacity .6s cubic-bezier(.4,0,.2,1) .7s;
+  }
   .title-svg .tg-line{
     font-family:'Barlow Condensed','Archivo Narrow',"Helvetica Neue",Arial,sans-serif;
     font-size:54px; font-weight:300; letter-spacing:-.01em;
@@ -109,7 +123,8 @@
     background:var(--ink);
   }
   @media (prefers-reduced-motion:reduce){
-    .title-svg{ transition:none }
+    .title-svg, .title-main, .title-alt,
+    .title:hover .title-main, .title:hover .title-alt{ transition:none }
     .veil.blink{ animation:none }
   }
 </style>
@@ -1710,8 +1725,8 @@ function runBlurChain(levels, preset){
 // One frame rendered at 4K for the title's download. `captureArmed` is set by
 // a title click; `frame()` applies the offscreen size before its layout pass
 // and `saveCapture()` runs right after the render, then the live sizes are
-// restored. `capturing` also forces the sharp path — the focus pull is not
-// part of a harvest.
+// restored. The frame is rendered exactly like the screen — the focus pull and
+// its blur included — only without the DOM title.
 let captureArmed = false, capturing = false, capturePR = 1;
 
 function harvest(){
@@ -1755,7 +1770,7 @@ function saveCapture(){
 }
 
 function renderScene(){
-  if (capturing || blurCur < 0.05){        // sharp: draw straight to the canvas
+  if (blurCur < 0.05){                     // sharp: draw straight to the canvas
     uInvert.value = darkOn ? 1 : 0;        // the plane shader carries the negative
     uCapture.value = 0;                    // the include encodes sRGB for us
     renderer.setRenderTarget(null);
@@ -2059,17 +2074,24 @@ document.querySelector('.title').addEventListener('click', harvest);
  *  Resize + loop
  * ------------------------------------------------------------------ */
 
-function resize(){
-  const w = window.innerWidth, h = window.innerHeight;
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+// Size the capture target and both blur chains from the renderer's current
+// drawing buffer. Shared by resize() and the 4K harvest, so the blur runs at
+// the capture resolution too.
+function sizeRenderTargets(){
   renderer.getDrawingBufferSize(_dbSize);
   rtScene.setSize(_dbSize.x, _dbSize.y);
   for (const chain of [blurChainA, blurChainB])
     chain.forEach((rt, i) =>
       rt.setSize(Math.max(1, Math.round(_dbSize.x / (2 << i))),
                  Math.max(1, Math.round(_dbSize.y / (2 << i)))));
+}
+
+function resize(){
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  sizeRenderTargets();
   fitViews();
   if (mode === '3d')            { dst.dist = cur.dist = dists.runway; }
   else if (mode === 'top')      { dst.dist = cur.dist = dists.dtop; }
@@ -2084,8 +2106,9 @@ function frame(now){
   prev = now;
 
   // Harvest setup: this frame renders at 4K (16:9) with the layout refitted to
-  // it, the sharp path forced in renderScene(), and the live sizes restored
-  // right after the capture below.
+  // it and the blur targets resized to match, so the focus pull is captured
+  // exactly as it looks; the live sizes are restored right after the capture
+  // below.
   if (captureArmed){
     captureArmed = false;
     capturing = true;
@@ -2095,6 +2118,7 @@ function frame(now){
     camera.aspect = CAPTURE_W / CAPTURE_H;
     camera.updateProjectionMatrix();
     fitViews(CAPTURE_H, 0);
+    sizeRenderTargets();
   }
 
   // Snappy while dragging, slow and cinematic for the automatic transitions
