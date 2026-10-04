@@ -2431,6 +2431,25 @@ if (viewParam === 'infinity'){
   Object.assign(cur, dst);
   blurCur = blurMaxPx();
   startSpin();
+  // ...and start it already settled, as if the mode had been left running for
+  // a while: the fill has landed (4s is past the 3.7s arm) and the ink has
+  // dissolved, so the first paint is the abstract colour field, not its
+  // construction. A later entry by scroll still plays the reveal.
+  infT = 4;
+  uLineReveal.value = 1;
+  uCellReveal.value = 1;
+  pickReady = true;
+  lineFadeT = LINE_FADE_DELAY + LINE_FADE_DUR;
+  uLineFade.value = 0;
+  // the title is part of the settled state too: its plate slide and ink drain
+  // jump straight to the infinity look for this first frame only. The forced
+  // reflow makes the browser compute that style with the transitions already
+  // off, so they never start; clearing the inline override afterwards only
+  // changes the transition property back, which animates nothing.
+  const titleEls = [document.querySelector('.title-box'), document.getElementById('tg-ink')];
+  for (const el of titleEls) el.style.transition = 'none';
+  void titleEls[0].offsetWidth;
+  requestAnimationFrame(() => { for (const el of titleEls) el.style.transition = ''; });
 }
 
 requestAnimationFrame(frame);
