@@ -34,7 +34,7 @@
   }
   #stage{position:fixed; inset:0}
   /* Dark mode: a literal negative of the scene, toggled by clicking a black
-     cell in infinity mode. The canvas is inverted in the shaders (`uInvert`),
+     cell in any view. The canvas is inverted in the shaders (`uInvert`),
      not here — a CSS filter over a WebGL canvas is a fragile compositor path
      and took a browser down under the filter-heavy dark-mode stack. The paper
      is inverted explicitly because the body background propagates to the
@@ -132,7 +132,7 @@
 <body>
 <div id="stage"></div>
 <div class="hud">
-  <div class="title" title="Harvest a 4K render">
+  <div class="title">
     <div class="title-box" aria-hidden="true"></div>
     <h1 aria-label="System Visions">
       <svg class="title-svg title-main" viewBox="0 0 200 108" preserveAspectRatio="xMinYMin meet" aria-hidden="true" focusable="false">
@@ -614,34 +614,55 @@ function resetPalette(){
   paletteHome = true;
 }
 
-// Mirrors the shader's iridescent rotation: Rodrigues about the grey axis,
-// in display space, so the title's gradient shifts exactly like the cells.
-function prismRotate(hex, a){
-  if (a === 0) return hex;
+// Pearl wash: the sheen the prism adds at full tilt — a white mix over the
+// colour fills (and the title's gradient), ramped quadratically so it stays
+// invisible at low iridescence and reads as foil when turned up. Injected into
+// the plane shader as a literal too, so both sides round the same number.
+const PEARL_GAIN = 0.5;
+// How much pearl a given prism value is adding. Declared before PRISM_MAX
+// (which lives with the interaction state) but only ever called after boot.
+const pearlAt = p => PEARL_GAIN * Math.min(1, Math.abs(p) / PRISM_MAX) ** 2;
+// On the runway the prism's one-sweep phase gradient is stretched across the
+// whole 15-tile floor, so the visible near field shows a flat tint instead of
+// bands; scaling the phase on the floor makes the rainbow repeat at floor
+// scale (gated by uRunway, so every other view keeps its single sweep).
+const RUNWAY_BANDS = 6;
+
+// Mirrors the shader's iridescent rotation: Rodrigues about the grey axis, in
+// display space, so the title's gradient shifts exactly like the cells.
+// `gloss` is the pearl wash, mixed in after the rotation (0 = none).
+function prismRotate(hex, a, gloss = 0){
+  if (a === 0 && gloss === 0) return hex;
   const n = parseInt(hex.slice(1), 16);
-  const c = [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+  let c = [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
   const k = 0.5773502692;
   const ca = Math.cos(a), sa = Math.sin(a);
   const dot = k * (c[0] + c[1] + c[2]);
+  c = [
+    c[0] * ca + k * (c[2] - c[1]) * sa + k * dot * (1 - ca),
+    c[1] * ca + k * (c[0] - c[2]) * sa + k * dot * (1 - ca),
+    c[2] * ca + k * (c[1] - c[0]) * sa + k * dot * (1 - ca)
+  ];
+  if (gloss > 0) c = c.map(v => v + (1 - v) * gloss);
   const to = v => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0');
-  return '#' + to(c[0] * ca + k * (c[2] - c[1]) * sa + k * dot * (1 - ca))
-             + to(c[1] * ca + k * (c[0] - c[2]) * sa + k * dot * (1 - ca))
-             + to(c[2] * ca + k * (c[1] - c[0]) * sa + k * dot * (1 - ca));
+  return '#' + to(c[0]) + to(c[1]) + to(c[2]);
 }
 
 function applyTitlePalette(){
   if (!TITLE.wedgeSlot || !TITLE.blobSlot) return;
   // the composition's centre sits at half the prism phase, so the title takes
-  // that shift and reads as part of the same rainbow
+  // that shift and reads as part of the same rainbow; the pearl wash follows
+  // the prism's magnitude, the same ramp the cells use
   const shift = prismCur * 0.5;
+  const gloss = pearlAt(prismCur);
   // the palette is one shared resource: a split-mode hue scrub lives on the
   // plane that holds the slot, so the title resolves slots through planeHex()
   // too and its gradient follows the grids' hues
   const slotHex = [0, 1, 2].map(slotColor);
   TITLE.wedges.forEach((w, i) =>
-    w.setAttribute('fill', prismRotate(slotHex[TITLE.wedgeSlot[i]], shift)));
+    w.setAttribute('fill', prismRotate(slotHex[TITLE.wedgeSlot[i]], shift, gloss)));
   TITLE.blobs.forEach((b, i) => {
-    const hex = prismRotate(slotHex[TITLE.blobSlot[i]], shift);
+    const hex = prismRotate(slotHex[TITLE.blobSlot[i]], shift, gloss);
     for (const stop of TITLE.grads[i].children) stop.setAttribute('stop-color', hex);
   });
 }
@@ -754,8 +775,9 @@ const uInvert     = { value: 0 };
 // exactly the bytes the canvas would.
 const uCapture    = { value: 0 };
 // Iridescent prism: a hue rotation about the grey axis, phased by how far a
-// fragment sits from the tile centre, so dragging sweeps rainbow bands through
-// the coloured cells. 0 is an exact no-op; the ink is neutral and never shifts.
+// fragment sits from the tile centre, so the title wheel (or the infinity
+// drag) sweeps rainbow bands through the coloured cells. It persists across
+// modes; 0 is an exact no-op, and the ink is neutral and never shifts.
 const uPrism      = { value: 0 };
 // Fixed painting frame, drawn from the frame map and faded in with the plate
 // offset: each plate carries its own frame and moves with it, so this is the
@@ -765,10 +787,11 @@ const uFrameAmt   = { value: 0 };
 // after a beat and ease back when it is released. The ink is what smears
 // through the blur, so the pull takes it away. 1 = the ink as drawn, 0 = none.
 const uLineFade   = { value: 1 };
-// Sliding sheets: the horizontal drag is a velocity for the layers scrolling
-// past each other, a misregistered print. It scrolls the texture offsets rather
-// than the meshes — the maps wrap, so no edge can ever come into view — and the
-// picker reads the same offsets, so clicks follow the scrolled pattern.
+// Print jogs: a drag gives a grid a velocity instead of a position, so the
+// layers keep scrolling past each other once released — a misregistered print.
+// It scrolls the texture offsets rather than the meshes — the maps wrap, so no
+// edge can ever come into view — and the picker reads the same offsets, so
+// clicks follow the jogged pattern. This caps the velocity a drag can set.
 const SHEET_SPEED = 2.6;             // world units / second at a full drag
 
 // The scene capture renders into a plain RGBA8 target, so the sRGB encode the
@@ -825,7 +848,7 @@ function makePlane(slot){
     shader.uniforms.uFill       = uFill;
     shader.uniforms.uRunway     = uRunway;
     shader.uniforms.uCellUVS    = uCellUVS;    // shared scale
-    shader.uniforms.uCellUVO    = cellUVO;     // per plane, so sheets can slide
+    shader.uniforms.uCellUVO    = cellUVO;     // per plane, so each print can jog
     shader.uniforms.uLineUVS    = uLineUVS;
     shader.uniforms.uLineUVO    = lineUVO;
     shader.uniforms.uFrameUVO   = frameUVO;
@@ -923,14 +946,24 @@ function makePlane(slot){
     float rw = length(wFrag) / max(${HALF} * uS, 0.0001);
     comp.a *= 1.0 - uRunway * smoothstep(${RUNWAY_HAZE.toFixed(2)}, 1.0, rw);
     // iridescence: rotate hue about the grey axis (the ink is neutral, so the
-    // black lines never shift), phased across the plane so the drag sweeps
+    // black lines never shift), phased across the plane so the wheel sweeps
     // rainbow bands through the composition — the bands turn with the artwork.
+    // On top rides the pearl wash: the colour fill lightens as the prism turns
+    // up, masked to the fill's coverage so the ink and the paper stay put.
     // uPrism = 0 is an exact no-op.
     if (uPrism != 0.0){
-      float a = uPrism * (0.5 + 0.5 * clamp(vLocal.y / ${HALF}, -1.0, 1.0));
+      // the runway is this plane scaled by RUNWAY_SPAN, so its one-sweep phase
+      // gradient is stretched over the floor; there the phase multiplies so
+      // the bands repeat at floor scale instead (see RUNWAY_BANDS)
+      float ph = clamp(vLocal.y / ${HALF}, -1.0, 1.0)
+               * mix(1.0, ${RUNWAY_BANDS.toFixed(1)}, uRunway);
+      float a = uPrism * (0.5 + 0.5 * ph);
       float ca = cos(a), sa = sin(a);
       vec3 k = vec3(0.5773502692);
       vec3 tint = comp.rgb * ca + cross(k, comp.rgb) * sa + k * dot(k, comp.rgb) * (1.0 - ca);
+      float turn = abs(uPrism) / ${PRISM_MAX.toFixed(4)};
+      float shown = cellT.r * cellT.a * cellA * (1.0 - lineT.a * lineA);
+      tint = mix(tint, vec3(1.0), clamp(${PEARL_GAIN.toFixed(2)} * turn * turn * shown, 0.0, 0.9));
       comp = vec4(clamp(tint, 0.0, 1.0), comp.a);
     }
     diffuseColor = vec4(diffuse, opacity) * comp;
@@ -1099,40 +1132,39 @@ function stopSpin(){
   spinGoal = Math.round(spinAngle / TAU) * TAU;
 }
 
-// The top view's vertical plate slide is the depth-axis counterpart of
-// infinity's sheet slide: each layer slides its whole print — fills and
-// gridlines together, a rigid plate — offset by its own share of one shared
-// displacement, so the three prints shear against each other and the
-// composition keeps re-forming. The machinery is complete (whiz-home on
-// setMode/enterInfinity, the fixed frame, the picker reading the offsets) but
-// its wheel binding is gone: the default view's scroll now falls into infinity,
-// and the control surface for the vertical movement is still to be chosen.
-// Declared here because the click handler and the frame loop need it.
-let plateY = 0;                          // accumulated vertical offset, world units
-let plateVel = 0;                        // world units / second
-let plateBraking = false;                // coasting smoothly to a stop
-let plateReturning = false;              // whizzing back to registration
+// Per-plane print jogs. A drag on a grid in split mode gives that one grid a
+// velocity on each axis — its fills and gridlines move together, a rigid
+// plate — and the velocity keeps running after release, riding every view: the
+// offsets feed the same per-plane UV uniforms in all modes and the picker
+// reads them. The infinity drag's horizontal axis jogs the x axis of all three
+// with the authored (i-1) shear; its vertical axis is the prism (below). The
+// machinery is declared up here because the click handler and the frame loop
+// need it.
+let slideX  = [0, 0, 0];                 // accumulated x offset, world units
+let slideXV = [0, 0, 0];                 // x velocity, world units / second
+let slideXV0 = [0, 0, 0];                // x velocity at pointer-down (jog origin)
+let slideXBrake = [false, false, false]; // coasting smoothly to an x stop
+let slideY  = [0, 0, 0];                 // accumulated v (depth) offset, world units
+let slideYV = [0, 0, 0];                 // v velocity, world units / second
+let slideYV0 = [0, 0, 0];                // v velocity at pointer-down
+let slideYBrake = [false, false, false]; // coasting smoothly to a v stop
+let artPlane = -1;                       // grid a split drag grabbed, -1 = none
 
-// Iridescent prism and sliding sheets state, also declared up here because
-// `applyTitlePalette()` reads `prismCur` and boots before the interaction
-// handlers exist. The infinity drag owns both axes: vertical = prism,
-// horizontal = the sheets' sliding velocity.
-const PRISM_MAX = Math.PI;               // ±180deg for a full-height drag
+// Iridescent prism state, also declared up here because `applyTitlePalette()`
+// reads `prismCur` and boots before the interaction handlers exist. The prism
+// is driven by the title's wheel and by the infinity drag's vertical axis, and
+// it persists across modes — only a blank tap (or the title wheel winding it
+// back) returns it to true colours.
+const PRISM_MAX = Math.PI;               // ±180deg
 let prismDst = 0, prismCur = 0, infinityDrag = false, dragMoved = false;
 let dragY0 = 0, prismStart = 0;
 let titlePrism = -1;                     // last prism value the title was drawn with
-let sheetOffset = 0;                     // accumulated slide, world units
-// One exact repeat of both maps: the cell meta-tile is K squares across and the
-// line tile one, so the whole pattern repeats every K squares of movement —
-// used by the slide along x and by the runway stream along v. The exit whizz
-// back wraps the accumulated offset by this, so a run that has been sliding or
-// streaming for minutes cannot leave the plates hundreds of units out to crawl
-// home — after the wrap every plate starts from within K/2 squares of register.
+// One exact repeat of both print maps: the cell meta-tile is K squares across
+// and the line tile one, so the whole pattern repeats every K squares of
+// movement. The per-frame wrap below keeps the accumulated jogs (and the
+// runway stream along v, which shares the constant) within half a repeat of
+// registration — integer multiples are visually identical, so this is unseen.
 const SHEET_WRAP = SIZE * TILE_K;        // world units per exact map repeat
-let sheetVel = 0, sheetVelDst = 0;       // world units / second
-let sheetVelStart = 0;                   // speed at pointer-down (jog origin)
-let sheetBraking = false;                // coasting smoothly to a stop
-let sheetReturning = false;              // whizzing back to registration
 let dragX0 = 0;
 
 // Runway stream: the flat 3D floor scrolls toward the horizon while every
@@ -1186,20 +1218,10 @@ function setMode(next){
   dst.fill    = 0;
   if (next === '3d'){ crawlReturning = false; crawlHold = false; }   // stream on
   else crawlRelease();                                               // whizz home
-  blurDst     = 0;                 // leaving infinity always returns to sharp
-  prismDst    = 0;                 // ...and to true colours...
-  sheetVelDst = 0;                 // ...and the sheets whizz back to register
-  // wrap to the equivalent offset nearest home first: the return speed is
-  // capped, and after a long slide the accumulated offset can be hundreds of
-  // world units out (see SHEET_WRAP). Integer multiples of the wrap are
-  // visually identical, so this cannot pop.
-  sheetOffset = ((sheetOffset + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP) % SHEET_WRAP
-              - SHEET_WRAP / 2;
-  sheetReturning = true;
-  // ...and the top view's vertical plates whizz home the same way
-  plateY = ((plateY + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP) % SHEET_WRAP
-         - SHEET_WRAP / 2;
-  plateReturning = true;
+  blurDst = 0;                 // leaving infinity always returns to sharp
+  // the print jogs and the prism are deliberately left where they are: the
+  // movement and the iridescence ride every view (the click handler is what
+  // resets them)
   stopSpin();
 }
 
@@ -1217,10 +1239,7 @@ function enterInfinity(){
   dst.fill = 1;                       // pattern tiles, so this is not a zoom
   cur.fill = 1;                       // apply immediately (visually identical)
   crawlRelease();                     // the floor unrolls on its way out
-  // the infinite grid ignores the vertical plates, so whizz them home first
-  plateY = ((plateY + SHEET_WRAP / 2) % SHEET_WRAP + SHEET_WRAP) % SHEET_WRAP
-         - SHEET_WRAP / 2;
-  plateReturning = true;
+  // the print jogs are left where they are; they ride into the lattice too
 
   uLineDir.value = Math.random() < 0.5 ? 1 : -1;   // outward or from the edges
   uLineReveal.value = 0;
@@ -1819,20 +1838,22 @@ function renderScene(){
  * ------------------------------------------------------------------ */
 
 let dragging = false, lastX = 0, lastY = 0;
-// Two drags share the pointer: outside infinity it orbits the camera, inside
-// it is the iridescent prism (the camera deliberately ignores infinity mode,
-// so this input was free). The orbit itself lives on the runway only — the top
-// view and the exploded row ignore the pointer (see pointerdown), so only a
-// runway drag can set `mode = 'custom'` and the first button stays a plain
-// top <-> runway switch in the default view. The blur is no longer draggable —
-// the title switch and the wheel's top hold it at max, and the wheel trims it.
-// The prism sticks where you leave it; leaving infinity is what resets it.
+// Three drags share the pointer. In split mode a drag on a grid jogs that
+// grid's print — per-plane x/v velocities, kept after release and across views.
+// In infinity the vertical axis is the iridescent prism and the horizontal axis
+// jogs all three prints with the authored (i-1) shear. Everywhere else it
+// orbits the camera, but the orbit lives on the runway only: the top view
+// ignores the pointer (its click is the shuffle), which is also why the toggle
+// button is the only way in and out of the runway from the default view. The
+// blur is no longer draggable — the title switch and the wheel's top hold it at
+// max. The prism and the print jogs stick where you leave them and ride every
+// view.
 let blurDst = 0, blurCur = 0;
 const blurMaxPx = () =>
   Math.min(20, Math.max(8, Math.min(window.innerWidth, window.innerHeight) * 0.024));
-// A small deadzone per drag axis in infinity, so taps and single-axis
-// adjustments stay clean: an axis only wakes past this many pixels, and the
-// excess is measured from the edge so nothing jumps when it does.
+// A small deadzone per drag axis, so taps and single-axis adjustments stay
+// clean: an axis only wakes past this many pixels, and the excess is measured
+// from the edge so nothing jumps when it does.
 const DRAG_DEADZONE = 10;
 const pastDeadzone = v => Math.sign(v) * Math.max(0, Math.abs(v) - DRAG_DEADZONE);
 const dom = renderer.domElement;
@@ -1842,19 +1863,36 @@ dom.addEventListener('pointerdown', e => {
     infinityDrag = true; dragMoved = false;
     dragY0 = e.clientY; prismStart = prismCur;
     dragX0 = e.clientX;
-    sheetReturning = false;                          // grab the sheets again...
-    sheetBraking = false;                            // ...at their current speed
-    sheetVelStart = sheetVel;                        // the jog starts from here
-    sheetVelDst = sheetVel;                          // ...so a vertical drag leaves it alone
+    for (let i = 0; i < 3; i++){                     // grab the prints again...
+      slideXV0[i] = slideXV[i];                      // ...at their current pace,
+      slideXBrake[i] = false;                        // ...so the jog starts here
+    }
     dom.setPointerCapture(e.pointerId);
     return;
   }
-  // The orbit is for the runway, where turning the floor is the point. The
-  // top view and the exploded row have no depth to turn into and their pointer
-  // is reserved for future cursor interactions, so they ignore the drag
-  // entirely — which is also why the toggle button is the only way in and out
-  // of the runway from the default view.
-  if (mode === 'top' || mode === 'split') return;
+  if (mode === 'split'){
+    // A press on a grid catches it: the grabbed plane halts under the finger,
+    // and a drag from there throws it again from a standstill (the paper
+    // between the grids starts nothing). The velocity keeps running after
+    // release (see the frame loop), so a flick leaves the grid moving into
+    // every other view.
+    const pick = pickAt(e.clientX, e.clientY);
+    if (!pick.plane) return;
+    artPlane = pick.plane.i;
+    dragMoved = false;
+    dragX0 = e.clientX; dragY0 = e.clientY;
+    slideXV[artPlane] = 0; slideYV[artPlane] = 0;
+    slideXV0[artPlane] = 0; slideYV0[artPlane] = 0;
+    slideXBrake[artPlane] = false;
+    slideYBrake[artPlane] = false;
+    dom.setPointerCapture(e.pointerId);
+    return;
+  }
+  // The orbit is for the runway, where turning the floor is the point. The top
+  // view has no depth to turn into and its pointer is the in-place shuffle, so
+  // it ignores the drag entirely — which is also why the toggle button is the
+  // only way in and out of the runway from the default view.
+  if (mode === 'top') return;
   dragging = true; lastX = e.clientX; lastY = e.clientY;
   dom.setPointerCapture(e.pointerId);
 });
@@ -1862,17 +1900,37 @@ dom.addEventListener('pointermove', e => {
   if (infinityDrag){
     if (mode !== 'infinity'){ infinityDrag = false; return; }
     const dy = dragY0 - e.clientY;                   // drag up = prism forward
-    const dx = e.clientX - dragX0;                   // drag right = sheets slide
+    const dx = e.clientX - dragX0;                   // drag right = prints slide
     if (Math.abs(dy) > DRAG_DEADZONE || Math.abs(dx) > DRAG_DEADZONE) dragMoved = true;
     if (dragMoved){
       // each axis is measured past its own deadzone, so a drag meant for one
       // axis leaves the other exactly where it was
       prismDst = Math.min(PRISM_MAX, Math.max(-PRISM_MAX,
         prismStart + pastDeadzone(dy) / (0.45 * window.innerHeight) * PRISM_MAX));
-      // the horizontal axis jogs the sheets' speed from wherever it already is,
-      // so a purely vertical drag (adjusting the prism) never disturbs them
-      sheetVelDst = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
-        sheetVelStart + pastDeadzone(dx) / (0.40 * window.innerWidth) * SHEET_SPEED));
+      // the horizontal axis adds the authored (i-1) shear to each plane's speed
+      // from wherever it already is, so a purely vertical drag (adjusting the
+      // prism) never disturbs the prints
+      const delta = pastDeadzone(dx) / (0.40 * window.innerWidth) * SHEET_SPEED;
+      for (let i = 0; i < 3; i++)
+        slideXV[i] = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
+          slideXV0[i] + (i - 1) * delta));
+    }
+    return;
+  }
+  if (artPlane >= 0){
+    if (mode !== 'split'){ artPlane = -1; return; }
+    const i = artPlane;
+    const dx = e.clientX - dragX0;
+    const dy = dragY0 - e.clientY;                   // drag up = print moves in
+    if (Math.abs(dx) > DRAG_DEADZONE || Math.abs(dy) > DRAG_DEADZONE) dragMoved = true;
+    if (dragMoved){
+      // measure each axis past its own deadzone, so a drag meant for one axis
+      // leaves the other exactly where it was, and start each jog from the
+      // velocity the grid already had
+      slideXV[i] = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
+        slideXV0[i] + pastDeadzone(dx) / (0.40 * window.innerWidth) * SHEET_SPEED));
+      slideYV[i] = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
+        slideYV0[i] + pastDeadzone(dy) / (0.40 * window.innerHeight) * SHEET_SPEED));
     }
     return;
   }
@@ -1883,8 +1941,8 @@ dom.addEventListener('pointermove', e => {
   dst.phi = Math.min(Math.max(dst.phi - dy * 0.006, 0.12), Math.PI - 0.12); // vertical = pitch
   mode = 'custom';
 });
-// releasing keeps the prism where it is and the sheets at their set speed
-const endDrag = () => { dragging = false; infinityDrag = false; };
+// releasing keeps the prism where it is and the print jogs at their set pace
+const endDrag = () => { dragging = false; infinityDrag = false; artPlane = -1; };
 dom.addEventListener('pointerup', endDrag);
 dom.addEventListener('pointercancel', endDrag);
 // Split mode's wheel scrubs the hue of the grid under the cursor (see `pl.hue`
@@ -2033,34 +2091,46 @@ function toggleDark(){
 }
 
 dom.addEventListener('click', e => {
-  if (dragMoved){ dragMoved = false; return; }     // a prism drag, not a pick
+  if (dragMoved){ dragMoved = false; return; }     // a drag, not a tap
+  if (mode === 'infinity' && !pickReady) return;   // not clickable until the fill lands
+  const pick = pickAt(e.clientX, e.clientY);
+  // A black fill cell is the inverted-mode switch, and it wins in every view:
+  // no mode needs a black square for anything else.
+  if (pick.kind === 'black'){ toggleDark(); return; }
   if (mode === 'top'){
     // clicking the artwork shuffles it in place; the paper around it is inert.
     // `pickAt` grazes a plane even on a blank sample, so any hit counts.
-    if (shufflePhase === 'idle' && pickAt(e.clientX, e.clientY).plane) shuffle();
+    if (shufflePhase === 'idle' && pick.plane) shuffle();
     return;
   }
   if (mode === 'split'){
-    // a blank (white) cell or the paper between the grids resets the whole
-    // scheme: the palette eases back to Mondrian and every grid's hue scrub
-    // clears — the blank-click reset of infinity mode, plus the scrubs
-    const pick = pickAt(e.clientX, e.clientY);
-    if (pick.kind === 'blank'){
+    // A tap on a grid is a catch, not a pick — the press already stopped it.
+    // Tapping the paper (no grid under the pointer) resets the whole colour
+    // scheme: the palette eases back to Mondrian, every grid's hue scrub
+    // clears, the prism snaps to true colours, and every print brakes where
+    // it is.
+    if (!pick.plane){
       resetPalette();
       for (const pl of planes) pl.hue = 0;
+      prismDst = 0;
+      for (let i = 0; i < 3; i++){
+        slideXBrake[i] = true;
+        slideYBrake[i] = true;
+      }
       applyPalette();
     }
     return;
   }
-  if (mode !== 'infinity' || !pickReady) return;
-  const pick = pickAt(e.clientX, e.clientY);
+  if (mode !== 'infinity') return;
   if (pick.kind === 'cell') retunePalette(pick.plane.slot);
   else if (pick.kind === 'blank'){                 // absence of colour reads as clear
     resetPalette();
     prismDst = 0;                                  // ...and clears the prism...
-    sheetVelDst = 0; sheetBraking = true;          // ...and brakes the sheets where they are
+    for (let i = 0; i < 3; i++){                   // ...and brakes the print where it is
+      slideXBrake[i] = true;
+      slideYBrake[i] = true;
+    }
   }
-  else if (pick.kind === 'black') toggleDark();
 });
 
 // The title is the harvest switch: hovering crossfades it to "harvest vision"
@@ -2069,6 +2139,20 @@ dom.addEventListener('click', e => {
 // in the image). The turntable lives on the wheel alone now: winding to the
 // top of the pull arms it and winding back down releases it.
 document.querySelector('.title').addEventListener('click', harvest);
+
+// The title is also the iridescence control: a wheel over it nudges the prism —
+// the same value the infinity drag's vertical axis drives — clamped at half a
+// turn each way, with a snap back to exact true colours near zero. The title's
+// gradient follows it (applyTitlePalette, half phase), and it persists across
+// modes: only a blank tap, or winding the wheel back to zero, clears it.
+const PRISM_WHEEL = 0.1;                 // degrees of hue per unit of wheel deltaY
+const PRISM_SNAP  = 0.09;                // radians (~5deg); wind below this and it lands on 0
+document.querySelector('.title').addEventListener('wheel', e => {
+  e.preventDefault();
+  prismDst = Math.min(PRISM_MAX, Math.max(-PRISM_MAX,
+    prismDst - e.deltaY * PRISM_WHEEL * DEG));
+  if (Math.abs(prismDst) < PRISM_SNAP) prismDst = 0;
+}, { passive: false });
 
 /* ------------------------------------------------------------------ *
  *  Resize + loop
@@ -2168,8 +2252,9 @@ function frame(now){
   // to sharp when infinity mode is left).
   blurCur += (blurDst - blurCur) * (1 - Math.exp(-dt * 1.6));
 
-  // Iridescent prism: exact while the finger is down, then it stays where it
-  // was left (leaving infinity resets it). The title's gradient follows it.
+  // Iridescent prism: exact while the finger is down, otherwise eased. It stays
+  // where it was left, in every mode — only a blank tap, or the title wheel
+  // wound back to zero, clears it. The title's gradient follows it.
   if (infinityDrag) prismCur = prismDst;
   else prismCur += (prismDst - prismCur) * (1 - Math.exp(-dt * 2.6));
   uPrism.value = prismCur;
@@ -2178,43 +2263,26 @@ function frame(now){
     applyTitlePalette();
   }
 
-  // Sliding sheets: the horizontal drag sets a speed and the sheets keep
-  // moving at it — no decay on release, so they hold the direction and pace
-  // you set. A blank click brakes them smoothly where they are; leaving
-  // infinity whizzes the offset back to registration and stops them.
-  if (sheetReturning){
-    sheetVel = 0;
-    sheetBraking = false;
-    const speed = Math.min(14, Math.max(2.5, Math.abs(sheetOffset) * 6));
-    const step = speed * dt;
-    if (Math.abs(sheetOffset) <= step){ sheetOffset = 0; sheetReturning = false; }
-    else sheetOffset -= Math.sign(sheetOffset) * step;
-  } else {
-    if (infinityDrag) sheetVel = sheetVelDst;
-    else if (sheetBraking){
-      sheetVel += (0 - sheetVel) * (1 - Math.exp(-dt * 3));
-      if (Math.abs(sheetVel) < 0.02){ sheetVel = 0; sheetBraking = false; }
+  // Per-plane print jogs: a drag sets a grid's velocity and the velocity keeps
+  // running after release — no decay — so a flicked grid holds its direction
+  // and pace into every view. A blank click in infinity brakes the print
+  // smoothly where it is. The per-frame wrap keeps the accumulated offset
+  // within half an exact map repeat of registration (an integer multiple out is
+  // visually identical), so a run left moving for minutes cannot grow the
+  // numbers — or drift the pattern — by whole repeats.
+  for (let i = 0; i < 3; i++){
+    if (slideXBrake[i]){
+      slideXV[i] += (0 - slideXV[i]) * (1 - Math.exp(-dt * 3));
+      if (Math.abs(slideXV[i]) < 0.02){ slideXV[i] = 0; slideXBrake[i] = false; }
     }
-    sheetOffset += sheetVel * dt;
-  }
-
-  // The top view's vertical plates: the wheel's jog, a brake to a stop where
-  // they are, or the whizz back to registration. Same shape as the sheets
-  // above, on the depth axis; the displacement is world units, shared and
-  // scaled per layer in the offsets block below.
-  if (plateReturning){
-    plateVel = 0;
-    plateBraking = false;
-    const speed = Math.min(14, Math.max(2.5, Math.abs(plateY) * 6));
-    const step = speed * dt;
-    if (Math.abs(plateY) <= step){ plateY = 0; plateReturning = false; }
-    else plateY -= Math.sign(plateY) * step;
-  } else {
-    if (plateBraking){
-      plateVel += (0 - plateVel) * (1 - Math.exp(-dt * 3));
-      if (Math.abs(plateVel) < 0.02){ plateVel = 0; plateBraking = false; }
+    if (slideYBrake[i]){
+      slideYV[i] += (0 - slideYV[i]) * (1 - Math.exp(-dt * 3));
+      if (Math.abs(slideYV[i]) < 0.02){ slideYV[i] = 0; slideYBrake[i] = false; }
     }
-    plateY += plateVel * dt;
+    slideX[i] = ((slideX[i] + slideXV[i] * dt + SHEET_WRAP / 2) % SHEET_WRAP
+              + SHEET_WRAP) % SHEET_WRAP - SHEET_WRAP / 2;
+    slideY[i] = ((slideY[i] + slideYV[i] * dt + SHEET_WRAP / 2) % SHEET_WRAP
+              + SHEET_WRAP) % SHEET_WRAP - SHEET_WRAP / 2;
   }
 
   // Runway stream: the floor only moves while it is lying flatter than it is
@@ -2247,8 +2315,9 @@ function frame(now){
   // home, and fades across the infinity boundary, where the composition is
   // changing anyway. The fixed frame also has no meaning on the runway floor,
   // where every square is already framed by the tiles themselves.
-  const platesOff = Math.abs(plateY) > 0.01 || plateVel !== 0 ||
-                    plateBraking || plateReturning;
+  const platesOff = planes.some(pl =>
+    Math.abs(slideX[pl.i]) > 0.01 || Math.abs(slideY[pl.i]) > 0.01 ||
+    slideXV[pl.i] !== 0 || slideYV[pl.i] !== 0);
   const frameOn = mode !== 'infinity' && mode !== '3d' && cur.crawl < 0.02
                && (platesOff || shufflePhase === 'shuffle');
   if (frameOn) uFrameAmt.value = 1;
@@ -2347,23 +2416,22 @@ function frame(now){
   const lineR = span;
   uCellUVS.value.set(cellR, cellR);
   uLineUVS.value.set(lineR, lineR);
-  // Each plane's offset is the shared centring plus its own slide; a plate
-  // moves fills and gridlines by the same world distance, and the two maps
-  // tile at different scales — the cell map K cells per UV, the line map one —
-  // so the same displacement takes a different UV delta per uniform. The maps
-  // repeat, so the slide is unbounded and never shows a plane edge.
+  // Each plane's offset is the shared centring plus its own print jog; the
+  // fills and gridlines move together by the same world distance, and the two
+  // maps tile at different scales — the cell map K cells per UV, the line map
+  // one — so the same displacement takes a different UV delta per uniform. The
+  // maps repeat, so a jog is unbounded and never shows a plane edge.
   const cellC = 0.5 - 0.5 * cellR, lineC = 0.5 - 0.5 * lineR;
   for (const pl of planes){
-    const slideC = (pl.i - 1) * sheetOffset / (SIZE * TILE_K);
-    const slideL = (pl.i - 1) * sheetOffset / SIZE;
-    // the top view's vertical plates add each layer's own share of the shared
-    // displacement, on the depth axis, riding the same two denominators as the
-    // horizontal slide so fills and ink stay locked
-    const plateC = (pl.i - 1) * plateY / (SIZE * TILE_K);
-    const plateL = (pl.i - 1) * plateY / SIZE;
+    const i = pl.i;
+    // this plane's own print jog, on both axes, in world units
+    const slideC = slideX[i] / (SIZE * TILE_K);
+    const slideL = slideX[i] / SIZE;
+    const plateC = slideY[i] / (SIZE * TILE_K);
+    const plateL = slideY[i] / SIZE;
     // the runway stream: shared base phase + this layer's own slow wobble,
     // both in world units along the depth axis, both riding the same
-    // denominators as the slide so fills and ink stay locked
+    // denominators as the jog so fills and ink stay locked
     const wob = crawlWob ? crawlWob[pl.i] : null;
     const crawlOff = crawlPhase[pl.i] + (wob
       ? wob.a * SIZE * crawl * Math.sin(TAU * (wob.f * crawlT + wob.p)) : 0);
@@ -2371,9 +2439,9 @@ function frame(now){
                          cellC + crawlOff / (SIZE * TILE_K) + plateC);
     pl.lineUVO.value.set(lineC + slideL,
                          lineC + crawlOff / SIZE + plateL);
-    // the pane frames ride the slide (they are part of the sheets'
-    // registration) but never the plate offset, so the painting stays framed
-    pl.frameUVO.value.set(lineC + slideL, lineC);
+    // the pane frames follow neither jog: the fixed copy holds the
+    // composition's boundary on both axes while the print slides underneath
+    pl.frameUVO.value.set(lineC, lineC);
   }
 
   for (const pl of planes){
