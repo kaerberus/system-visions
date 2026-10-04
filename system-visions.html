@@ -144,20 +144,11 @@
   }
   .controls button:last-child{ margin-right:0 }
   .controls button svg{ width:calc(var(--btn) * .48); height:calc(var(--btn) * .48); display:block; flex:none }
-  .controls button .ic-top{ display:none }
-  #toggle  { --tint:var(--blue) }
-  #explode { --tint:var(--yellow) }
   #shuffle { --tint:var(--red) }
-  #toggle.is-top .ic-top{ display:block }
-  #toggle.is-top .ic-3d{ display:none }
   .controls button:hover{ background:var(--tint); color:#fbf8f1; transform:translateY(-1px) }
-  #explode:hover{ color:var(--ink) }         /* dark icon reads on yellow */
-  #explode.is-split{ background:var(--tint); color:var(--ink) }
   .controls button:active{ transform:translateY(0) }
-  /* infinity mode fades the other controls away: the mode is entered by
+  /* infinity mode fades the remaining control away: the mode is entered by
      scrolling up and left by scrolling down, so there is nothing to press */
-  body.infinity #toggle,
-  body.infinity #explode,
   body.infinity #shuffle{
     width:0; opacity:0; margin-right:0; border-width:0; pointer-events:none;
   }
@@ -213,24 +204,6 @@
     </h1>
   </div>
   <div class="controls">
-    <button id="toggle" aria-label="Top view or 3D view" title="Top / 3D view">
-      <svg class="ic-3d" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
-        <path d="M12 2.6 21 7v10l-9 4.4L3 17V7Z"/>
-        <path d="M3 7l9 4.4L21 7"/>
-        <path d="M12 11.4v10"/>
-      </svg>
-      <svg class="ic-top" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
-        <rect x="3.5" y="3.5" width="17" height="17"/>
-        <path d="M3.5 9.7h17M3.5 14.5h17M9.7 3.5v17M14.5 3.5v17"/>
-      </svg>
-    </button>
-    <button id="explode" aria-label="Explode or collapse the grids" title="Explode / collapse">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
-        <path d="M12 3 21 8l-9 5-9-5Z"/>
-        <path d="M3 12.4 12 17.4 21 12.4"/>
-        <path d="M3 16.4 12 21.4 21 16.4"/>
-      </svg>
-    </button>
     <button id="shuffle" aria-label="Shuffle the composition" title="Shuffle">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
         <path d="M3 7h3.2c1.7 0 3.3.9 4.2 2.3l3.2 5.4c.9 1.4 2.5 2.3 4.2 2.3H21"/>
@@ -1129,8 +1102,7 @@ function fitViews(){
   uR0.value = (SIZE * 0.5) / uMaxRadius.value;
 }
 
-const toggleBtn   = document.getElementById('toggle');
-const explodeBtn  = document.getElementById('explode');
+const shuffleBtn = document.getElementById('shuffle');
 let mode = '3d';
 let infT = 0;              // seconds since infinity mode was entered
 // Focus-pull ink: once the pull has been held for LINE_FADE_DELAY the gridlines
@@ -1239,19 +1211,11 @@ function crawlRelease(){
   crawlHold = true;
 }
 
-function updateToggleIcon(){
-  // show the grid icon (i.e. "press to collapse to top") unless we are
-  // already sitting in the aligned top view or the exploded row
-  toggleBtn.classList.toggle('is-top', mode !== 'top' && mode !== 'split');
-}
-
 function setMode(next){
   document.body.classList.remove('infinity');
   uLineReveal.value = 1;      // everything shown outside infinity mode
   uCellReveal.value = 1;
   mode = next;
-  updateToggleIcon();
-  explodeBtn.classList.toggle('is-split', next === 'split');
 
   const src = next === '3d' ? VIEW3D : next === 'split' ? VIEWSPLIT : VIEWTOP;
   dst.theta   = src.theta;
@@ -1303,8 +1267,6 @@ function reveal(){
   document.body.classList.remove('infinity');
   uLineReveal.value = 1;
   uCellReveal.value = 1;
-  updateToggleIcon();
-  explodeBtn.classList.remove('is-split');
 }
 
 // Infinity mode: the flat composition stays put while its repeating grid
@@ -1314,7 +1276,6 @@ function enterInfinity(){
   mode = 'infinity';
   infT = 0;
   document.body.classList.add('infinity');
-  updateToggleIcon();
 
   dst.theta = VIEWTOP.theta; dst.phi = VIEWTOP.phi;
   dst.shift = 0; dst.explode = 0; dst.crawl = 0;
@@ -1918,7 +1879,6 @@ dom.addEventListener('pointermove', e => {
   dst.theta -= dx * 0.006;                                   // horizontal = yaw
   dst.phi = Math.min(Math.max(dst.phi - dy * 0.006, 0.12), Math.PI - 0.12); // vertical = pitch
   mode = 'custom';
-  updateToggleIcon();
 });
 // releasing keeps the prism where it is and the sheets at their set speed
 const endDrag = () => { dragging = false; infinityDrag = false; };
@@ -2101,15 +2061,7 @@ dom.addEventListener('click', e => {
   else if (pick.kind === 'black') toggleDark();
 });
 
-// Top <-> runway. In the default view it is a plain toggle for the runway
-// (nothing can turn the top view into 'custom' any more); split hands over to
-// the runway too, while the explode button owns the side-by-side row, and a
-// runway orbit ('custom') collapses back to the canonical top view.
-toggleBtn.addEventListener('click', () => {
-  setMode((mode === 'top' || mode === 'split') ? '3d' : 'top');
-});
-explodeBtn.addEventListener('click', () => setMode(mode === 'split' ? 'top' : 'split'));
-document.getElementById('shuffle').addEventListener('click', shuffle);
+shuffleBtn.addEventListener('click', shuffle);
 
 // The title (and its plate) is the infinity mode turntable only: a click ramps
 // the blur to max and sets the artwork spinning in its own plane, another eases
