@@ -1934,15 +1934,17 @@ dom.addEventListener('wheel', e => {
     return;
   }
   if (mode === 'top'){
-    // scrolling up falls into infinity; the other half of the axis is left
-    // free for the vertical movement control still to be chosen
+    // the two directions open the two extended views: up falls into infinity,
+    // down opens the exploded row
     if (e.deltaY < 0) enterInfinity();
+    else setMode('split');
     return;
   }
   if (mode === 'split'){
-    // scrolling scrubs the hue of the grid under the cursor, continuously and
-    // on top of its palette colour (see planeHex); the paper between the grids
-    // is inert — split does not zoom.
+    // up retracts to the framed default; down scrubs the hue of the grid under
+    // the cursor, continuously and on top of its palette colour (see
+    // planeHex); the paper between the grids is inert — split does not zoom.
+    if (e.deltaY < 0){ setMode('top'); return; }
     const pick = pickAt(e.clientX, e.clientY);
     if (pick.plane){
       const pl = pick.plane;
