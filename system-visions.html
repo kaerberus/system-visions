@@ -123,14 +123,18 @@
     background:var(--ink);
   }
   /* Mode dots: a transient chain readout at bottom centre. One dot per step of
-     the wheel's hierarchy, all hollow with the same 2px black stroke, the
-     current one filled with its step's colour — ink, the three palette slots,
-     then white. Fades in when a scroll crosses a step and out a beat after. */
+     the wheel's hierarchy, on a half-transparent light gray pill so they read
+     over any artwork; all hollow with the same 2px black stroke, the current
+     one filled with its step's colour — ink, the three palette slots, then
+     white. Fades in when a scroll crosses a step and out a beat after. */
   .mode-dots{
     position:absolute; left:50%; bottom:clamp(14px,2.6vw,30px);
     transform:translateX(-50%);
-    display:flex; gap:12px; opacity:0;
-    transition:opacity .55s ease;
+    display:flex; gap:11px; align-items:center;
+    padding:7px 13px; border-radius:999px;
+    background:rgba(228,225,217,.5);
+    box-shadow:0 1px 4px rgba(17,17,17,.10);
+    opacity:0; transition:opacity .55s ease;
   }
   .mode-dots.on{ opacity:1 }
   .mode-dots i{
