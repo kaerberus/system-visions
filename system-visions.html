@@ -811,6 +811,13 @@ const uFrameAmt   = { value: 0 };
 // after a beat and ease back when it is released. The ink is what smears
 // through the blur, so the pull takes it away. 1 = the ink as drawn, 0 = none.
 const uLineFade   = { value: 1 };
+// Reset wave: clicking the blank canvas clears the colour scheme with a front
+// that sweeps out from the click — each fill flips from its frozen pre-click
+// colour to the reset colour as the wave passes it. Screen-space (device
+// pixels), so it crosses the exploded grids wherever they sit. < 0 = off.
+const uWaveFront  = { value: -1 };
+const uWaveO      = { value: new THREE.Vector2() };
+const uWaveW      = { value: 110 };
 // Print jogs: a drag gives a grid a velocity instead of a position, so the
 // layers keep scrolling past each other once released — a misregistered print.
 // It scrolls the texture offsets rather than the meshes — the maps wrap, so no
@@ -840,6 +847,7 @@ function makePlane(slot){
   const frameMap  = { value: null };
   const revealMap = { value: null };
   const cellColor = { value: new THREE.Color(COLORS[slot]) }; // paletteNow[slot]
+  const cellOld   = { value: new THREE.Color(COLORS[slot]) }; // pre-reset fill
   const cellUVO   = { value: new THREE.Vector2() };           // per plane: centring + slide
   const lineUVO   = { value: new THREE.Vector2() };           // ...plus the plate offset
   const frameUVO  = { value: new THREE.Vector2() };           // ...but the plate offset never moves it
@@ -877,6 +885,10 @@ function makePlane(slot){
     shader.uniforms.uLineUVO    = lineUVO;
     shader.uniforms.uFrameUVO   = frameUVO;
     shader.uniforms.uCellColor  = cellColor;
+    shader.uniforms.uCellOld    = cellOld;
+    shader.uniforms.uWaveFront  = uWaveFront;
+    shader.uniforms.uWaveO      = uWaveO;
+    shader.uniforms.uWaveW      = uWaveW;
     shader.uniforms.uInk        = uInk;
     shader.uniforms.uInvert     = uInvert;
     shader.uniforms.uCapture    = uCapture;
@@ -893,7 +905,7 @@ function makePlane(slot){
         'uniform sampler2D uLineMap;\nuniform sampler2D uFrameMap;\nuniform sampler2D uRevealMap;\n' +
         'uniform vec2 uCellUVS;\nuniform vec2 uCellUVO;\n' +
         'uniform vec2 uLineUVS;\nuniform vec2 uLineUVO;\nuniform vec2 uFrameUVO;\n' +
-        'uniform vec3 uCellColor;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\nuniform float uFrameAmt;\nuniform float uLineFade;\n' +
+        'uniform vec3 uCellColor;\nuniform vec3 uCellOld;\nuniform float uWaveFront;\nuniform vec2 uWaveO;\nuniform float uWaveW;\nuniform vec3 uInk;\nuniform float uInvert;\nuniform float uCapture;\nuniform float uPrism;\nuniform float uFrameAmt;\nuniform float uLineFade;\n' +
         'uniform float uLineReveal;\nuniform float uCellReveal;\n' +
         'uniform float uLineDir;\nuniform float uS;\n' +
         'uniform float uMaxRadius;\nuniform float uR0;\nuniform float uSpan;\nuniform float uFrame;\nuniform float uFill;\nuniform float uRunway;\n' +
@@ -905,8 +917,19 @@ function makePlane(slot){
     vec2 uvL = vUv * uLineUVS + uLineUVO;
     vec2 uvF = vUv * uLineUVS + uFrameUVO;
     vec4 cellT = texture2D(map, uvC);
-    // the cell map is a mask: white = palette fill, black = black cell
-    vec3 cellRGB = mix(uInk, uCellColor, cellT.r);
+    // the cell map is a mask: white = palette fill, black = black cell. While
+    // a reset wave is running, each fill flips from its frozen pre-click colour
+    // to the live (reset) colour as the front passes, with a light rim riding
+    // the front (fill only, so the ink and the paper stay put).
+    vec3 fill = uCellColor;
+    if (uWaveFront >= 0.0){
+      float wr = length(gl_FragCoord.xy - uWaveO);
+      float past = 1.0 - smoothstep(uWaveFront - uWaveW, uWaveFront + uWaveW, wr);
+      fill = mix(uCellOld, fill, past);
+      float rim = 1.0 - clamp(abs(wr - uWaveFront) / uWaveW, 0.0, 1.0);
+      fill = mix(fill, vec3(1.0), rim * 0.35);
+    }
+    vec3 cellRGB = mix(uInk, fill, cellT.r);
     vec4 lineT = texture2D(uLineMap, uvL);
     // Ink coverage gain: a plate's line edges are sub-pixel soft, and where two
     // plates' lines overlap the two half-coverages leave a hairline of paper
@@ -1005,7 +1028,7 @@ function makePlane(slot){
 
   const mesh = new THREE.Mesh(geo, mat);
   scene.add(mesh);
-  return { mesh, mat, lineMap, frameMap, revealMap, cellColor, cellUVO, lineUVO, frameUVO };
+  return { mesh, mat, lineMap, frameMap, revealMap, cellColor, cellOld, cellUVO, lineUVO, frameUVO };
 }
 
 // Each plate's shuffle jolt: the in-place shuffle throws the plates out along
@@ -2171,6 +2194,22 @@ function toggleDark(){
   darkGate = setTimeout(() => { darkBusy = false; }, VEIL_BLINK_MS);
 }
 
+// The reset wave: a screen-space front that sweeps out from the click while
+// the colour scheme resets (see the shader's uWaveFront). `waveFront` is how
+// far the front has travelled, in device pixels; the frame loop advances it at
+// a constant screen speed until it has crossed the whole viewport.
+const WAVE_SPEED = 1500;                 // CSS px / second
+const WAVE_W = 110;                      // CSS px, half the soft front's width
+let waveFront = -1, waveMax = 0;
+function startWave(clientX, clientY){
+  const dpr = renderer.getPixelRatio();
+  uWaveO.value.set(clientX * dpr, (window.innerHeight - clientY) * dpr);
+  uWaveW.value = WAVE_W * dpr;
+  waveFront = 0;
+  waveMax = Math.hypot(window.innerWidth, window.innerHeight) * dpr + uWaveW.value * 2;
+  uWaveFront.value = 0;
+}
+
 dom.addEventListener('click', e => {
   if (dragMoved){ dragMoved = false; return; }     // a drag, not a tap
   if (mode === 'infinity' && !pickReady) return;   // not clickable until the fill lands
@@ -2188,9 +2227,12 @@ dom.addEventListener('click', e => {
     // A tap on a grid is a catch, not a pick — the press already stopped it.
     // Tapping the paper (no grid under the pointer) resets the whole colour
     // scheme: the palette eases back to Mondrian, every grid's hue scrub
-    // clears, the prism snaps to true colours, and every print brakes where
-    // it is.
+    // clears, the prism snaps to true colours, every print brakes where it
+    // is — and the reset sweeps out from the click as a wave (see startWave,
+    // which freezes the fills first so the shader can flip them behind it).
     if (!pick.plane){
+      // freeze the current fills, reset the scheme, then wave the reset in
+      for (const pl of planes) pl.cellOld.value.setStyle(planeHex(pl));
       resetPalette();
       for (const pl of planes) pl.hue = 0;
       prismDst = 0;
@@ -2199,18 +2241,21 @@ dom.addEventListener('click', e => {
         slideYBrake[i] = true;
       }
       applyPalette();
+      startWave(e.clientX, e.clientY);
     }
     return;
   }
   if (mode !== 'infinity') return;
   if (pick.kind === 'cell') retunePalette(pick.plane.slot);
   else if (pick.kind === 'blank'){                 // absence of colour reads as clear
+    for (const pl of planes) pl.cellOld.value.setStyle(planeHex(pl));
     resetPalette();
     prismDst = 0;                                  // ...and clears the prism...
     for (let i = 0; i < 3; i++){                   // ...and brakes the print where it is
       slideXBrake[i] = true;
       slideYBrake[i] = true;
     }
+    startWave(e.clientX, e.clientY);
   }
 });
 
@@ -2364,6 +2409,14 @@ function frame(now){
               + SHEET_WRAP) % SHEET_WRAP - SHEET_WRAP / 2;
     slideY[i] = ((slideY[i] + slideYV[i] * dt + SHEET_WRAP / 2) % SHEET_WRAP
               + SHEET_WRAP) % SHEET_WRAP - SHEET_WRAP / 2;
+  }
+
+  // Reset wave: advance the front at a constant screen speed and switch it off
+  // once it has crossed the viewport, where everything it can reach is reset.
+  if (waveFront >= 0){
+    waveFront += WAVE_SPEED * renderer.getPixelRatio() * dt;
+    if (waveFront > waveMax) waveFront = -1;
+    uWaveFront.value = waveFront;
   }
 
   // Runway stream: the floor only moves while it is lying flatter than it is
