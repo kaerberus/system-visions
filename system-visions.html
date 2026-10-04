@@ -76,12 +76,10 @@
   .title{
     position:absolute; top:clamp(16px,3vw,34px); left:clamp(16px,3vw,34px);
     max-width:min(54ch,72vw);
-    /* the title is the infinity focus-pull turntable switch (see the click
-       handler); outside infinity it does nothing, so it only reads as
-       clickable there */
-    pointer-events:auto; cursor:default;
+    /* the title is the harvest switch: hover swaps the name, clicking saves a
+       4K render (see the handlers) */
+    pointer-events:auto; cursor:pointer;
   }
-  body.infinity .title{ cursor:pointer }
   .title h1{ position:relative; z-index:1; margin:0 }
   /* The title is SVG so the palette gradient can be clipped to the exact glyph
      geometry. The viewBox is a fixed design space (font-size 54 there); the CSS
@@ -89,7 +87,17 @@
   .title-svg{
     display:block; width:auto; height:clamp(78px,11vw,149px); aspect-ratio:200/108;
     overflow:visible;
+    transition:opacity .6s cubic-bezier(.4,0,.2,1),
+               transform .6s cubic-bezier(.4,0,.2,1);   /* the hover swap */
   }
+  /* the harvest label is a second copy of the same clipped gradient (reused
+     through <use>); the two crossfade and lift past each other on hover */
+  .title-alt{
+    position:absolute; top:0; left:0;
+    opacity:0; transform:translateY(-9px); pointer-events:none;
+  }
+  .title:hover .title-main{ opacity:0; transform:translateY(9px) }
+  .title:hover .title-alt{ opacity:1; transform:none }
   .title-svg .tg-line{
     font-family:'Barlow Condensed','Archivo Narrow',"Helvetica Neue",Arial,sans-serif;
     font-size:54px; font-weight:300; letter-spacing:-.01em;
@@ -101,6 +109,7 @@
     background:var(--ink);
   }
   @media (prefers-reduced-motion:reduce){
+    .title-svg{ transition:none }
     .veil.blink{ animation:none }
   }
 </style>
@@ -108,10 +117,10 @@
 <body>
 <div id="stage"></div>
 <div class="hud">
-  <div class="title">
+  <div class="title" title="Harvest a 4K render">
     <div class="title-box" aria-hidden="true"></div>
     <h1 aria-label="System Visions">
-      <svg class="title-svg" viewBox="0 0 200 108" preserveAspectRatio="xMinYMin meet" aria-hidden="true" focusable="false">
+      <svg class="title-svg title-main" viewBox="0 0 200 108" preserveAspectRatio="xMinYMin meet" aria-hidden="true" focusable="false">
         <defs>
           <filter id="tg-soft" x="-25%" y="-25%" width="150%" height="150%">
             <feGaussianBlur stdDeviation="12"/>
@@ -149,6 +158,18 @@
             <circle id="tg-b2" cx="140" cy="70" r="70" fill="url(#tg-g2)"/>
             <circle id="tg-b3" cx="100" cy="100" r="70" fill="url(#tg-g3)"/>
           </g>
+        </g>
+      </svg>
+      <!-- the hover state: the same gradient, reused through <use>, clipped to
+           the harvest words; CSS crossfades the two copies -->
+      <svg class="title-svg title-alt" viewBox="0 0 200 108" preserveAspectRatio="xMinYMin meet" aria-hidden="true" focusable="false">
+        <clipPath id="tg-clip-harvest">
+          <text class="tg-line" x="0" y="46">harvest</text>
+          <text class="tg-line" x="0" y="100">vision</text>
+        </clipPath>
+        <g clip-path="url(#tg-clip-harvest)">
+          <use href="#tg-pie"/>
+          <use href="#tg-blobs"/>
         </g>
       </svg>
     </h1>
@@ -984,7 +1005,8 @@ function explodeAxis(){
 // dominates and this changes nothing.
 const SPLIT_HUD_PAD = 10;                 // px of air around the row
 
-function fitViews(){
+function fitViews(vh = window.innerHeight,
+                  titleBottom = document.querySelector('.title').getBoundingClientRect().bottom){
   dists.d3d  = Math.max(12.6, distToFit(SIZE * 1.5, SIZE * 1.5));
   dists.dtop = Math.max(9.0,  distToFit(SIZE * 1.38, SIZE * 1.38));
   const ax = explodeAxis();
@@ -994,9 +1016,10 @@ function fitViews(){
   // the view-plane offset, so if the band is `bandHalf` px to each side of the
   // centre and the row half-height is H/4 of the full font height at dist H,
   // the distance that shrinks the row to the band is H²/4 / bandHalf times it.
-  const H = window.innerHeight;
-  const titleR = document.querySelector('.title').getBoundingClientRect();
-  const insetTop = Math.max(0, titleR.bottom) + SPLIT_HUD_PAD;
+  // `vh`/`titleBottom` are overridable for the offscreen 4K harvest, where the
+  // window's HUD is not part of the image.
+  const H = vh;
+  const insetTop = Math.max(0, titleBottom) + SPLIT_HUD_PAD;
   const insetBot = SPLIT_HUD_PAD;
   const bandHalf = Math.max(H * 0.12, Math.min(H / 2 - insetTop, H / 2 - insetBot));
   const heightD = (spanY * 1.06 / 2) * (H / 2) / bandHalf /
@@ -1284,14 +1307,16 @@ function titleTick(dt){
   }
 }
 
-// the clip is cut from live text, so nudge it once the webfont has settled
+// the clips are cut from live text, so nudge both SVG copies once the webfont
+// has settled
 if (document.fonts && document.fonts.ready){
   document.fonts.ready.then(() => {
-    const clipped = document.querySelector('.title-svg [clip-path]');
-    if (!clipped) return;
-    clipped.removeAttribute('clip-path');
-    void clipped.getBoundingClientRect();
-    clipped.setAttribute('clip-path', 'url(#tg-clip)');
+    document.querySelectorAll('.title-svg [clip-path]').forEach(clipped => {
+      const ref = clipped.getAttribute('clip-path');
+      clipped.removeAttribute('clip-path');
+      void clipped.getBoundingClientRect();
+      clipped.setAttribute('clip-path', ref);
+    });
   });
 }
 
@@ -1682,8 +1707,55 @@ function runBlurChain(levels, preset){
     blurPass(blurUpMat, levels[i], preset.offset, levels[i - 1]);
 }
 
+// One frame rendered at 4K for the title's download. `captureArmed` is set by
+// a title click; `frame()` applies the offscreen size before its layout pass
+// and `saveCapture()` runs right after the render, then the live sizes are
+// restored. `capturing` also forces the sharp path — the focus pull is not
+// part of a harvest.
+let captureArmed = false, capturing = false, capturePR = 1;
+
+function harvest(){
+  captureArmed = true;
+}
+
+const CAPTURE_W = 3840, CAPTURE_H = 2160;
+
+// Compose the captured canvas over the page's paper and hand it to the
+// browser as a PNG download. The paper is the CSS radial gradient recreated in
+// 2D canvas space (an ellipse centred at 50%/25%, matching the two body
+// backgrounds), so the image looks like the page; dark mode uses the inverted
+// paper. The title is DOM, so it is simply not part of the capture.
+function saveCapture(){
+  const c = document.createElement('canvas');
+  c.width = CAPTURE_W; c.height = CAPTURE_H;
+  const ctx = c.getContext('2d');
+  ctx.save();
+  ctx.translate(CAPTURE_W / 2, CAPTURE_H * 0.25);
+  ctx.scale(CAPTURE_W * 1.2, CAPTURE_H * 0.9);
+  const paper = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+  const stops = darkOn
+    ? ['#04070e', '#101623', '#232b3c']
+    : ['#fbf8f1', '#efe9dc', '#dcd4c3'];
+  paper.addColorStop(0, stops[0]);
+  paper.addColorStop(0.55, stops[1]);
+  paper.addColorStop(1, stops[2]);
+  ctx.fillStyle = paper;
+  ctx.fillRect(-2, -2, 4, 4);
+  ctx.restore();
+  ctx.drawImage(renderer.domElement, 0, 0);
+  c.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'harvest-vision-3840x2160.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }, 'image/png');
+}
+
 function renderScene(){
-  if (blurCur < 0.05){                     // sharp: draw straight to the canvas
+  if (capturing || blurCur < 0.05){        // sharp: draw straight to the canvas
     uInvert.value = darkOn ? 1 : 0;        // the plane shader carries the negative
     uCapture.value = 0;                    // the include encodes sRGB for us
     renderer.setRenderTarget(null);
@@ -1976,17 +2048,12 @@ dom.addEventListener('click', e => {
   else if (pick.kind === 'black') toggleDark();
 });
 
-// The title (and its plate) is the infinity mode turntable only: a click ramps
-// the blur to max and sets the artwork spinning in its own plane, another eases
-// it back to the nearest full turn and releases the blur — and the wheel
-// running to the top of the pull arms the very same turntable (winding back
-// down releases it). Outside infinity the title does nothing at all; the top
-// view's plate slide now lives on the wheel, so this cursor is free for later.
-document.querySelector('.title').addEventListener('click', () => {
-  if (mode !== 'infinity') return;
-  if (spinning){ stopSpin(); blurDst = 0; }
-  else startSpin();
-});
+// The title is the harvest switch: hovering crossfades it to "harvest vision"
+// (two SVG copies, see the markup), clicking saves the current view as a 4K
+// PNG (see saveCapture — the plate and letters are DOM, so they never appear
+// in the image). The turntable lives on the wheel alone now: winding to the
+// top of the pull arms it and winding back down releases it.
+document.querySelector('.title').addEventListener('click', harvest);
 
 /* ------------------------------------------------------------------ *
  *  Resize + loop
@@ -2015,6 +2082,20 @@ let prev = performance.now();
 function frame(now){
   const dt = Math.min((now - prev) / 1000, 0.05);
   prev = now;
+
+  // Harvest setup: this frame renders at 4K (16:9) with the layout refitted to
+  // it, the sharp path forced in renderScene(), and the live sizes restored
+  // right after the capture below.
+  if (captureArmed){
+    captureArmed = false;
+    capturing = true;
+    capturePR = renderer.getPixelRatio();
+    renderer.setPixelRatio(1);
+    renderer.setSize(CAPTURE_W, CAPTURE_H, false);
+    camera.aspect = CAPTURE_W / CAPTURE_H;
+    camera.updateProjectionMatrix();
+    fitViews(CAPTURE_H, 0);
+  }
 
   // Snappy while dragging, slow and cinematic for the automatic transitions
   const rate = dragging ? 9.0 : 1.2;
@@ -2292,6 +2373,13 @@ function frame(now){
   }
 
   renderScene();
+
+  if (capturing){
+    capturing = false;
+    saveCapture();                 // reads the canvas before the task yields
+    renderer.setPixelRatio(capturePR);
+    resize();                      // restore sizes, aspect and the view fit
+  }
 
   requestAnimationFrame(frame);
 }
