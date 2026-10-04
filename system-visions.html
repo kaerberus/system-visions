@@ -154,10 +154,8 @@
   #explode:hover{ color:var(--ink) }         /* dark icon reads on yellow */
   #explode.is-split{ background:var(--tint); color:var(--ink) }
   .controls button:active{ transform:translateY(0) }
-  #infinity{ --tint:var(--ink) }
-  #infinity.is-on{ background:var(--ink); color:#fbf8f1 }
-  /* infinity mode fades the other controls away and lets the infinity button
-     glide into the centre */
+  /* infinity mode fades the other controls away: the mode is entered by
+     scrolling up and left by scrolling down, so there is nothing to press */
   body.infinity #toggle,
   body.infinity #explode,
   body.infinity #shuffle{
@@ -240,11 +238,6 @@
         <path d="M14.2 8.4C15 7.1 16.5 7 17.8 7H21"/>
         <path d="M18.2 4l3 3-3 3"/>
         <path d="M18.2 14l3 3-3 3"/>
-      </svg>
-    </button>
-    <button id="infinity" aria-label="Infinity mode" title="Infinity mode">
-      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
-        <path d="M18.6 6.62c-1.44 0-2.8.56-3.77 1.53L12 10.66l-1.52 1.34h.01L7.8 14.39c-.64.64-1.49.99-2.4.99-1.87 0-3.39-1.51-3.39-3.38S3.53 8.62 5.4 8.62c.91 0 1.76.35 2.44 1.03l1.13 1 1.51-1.34L9.22 8.2C8.2 7.18 6.84 6.62 5.4 6.62 2.42 6.62 0 9.04 0 12s2.42 5.38 5.4 5.38c1.44 0 2.8-.56 3.77-1.53l2.83-2.5.01.01L13.52 12h-.01l2.69-2.39c.64-.64 1.49-.99 2.4-.99 1.87 0 3.39 1.51 3.39 3.38s-1.52 3.38-3.39 3.38c-.9 0-1.76-.35-2.44-1.03l-1.14-1.01-1.51 1.34 1.27 1.12c1.02 1.01 2.37 1.57 3.82 1.57 2.98 0 5.4-2.41 5.4-5.38s-2.42-5.38-5.4-5.38z"/>
       </svg>
     </button>
   </div>
@@ -1138,7 +1131,6 @@ function fitViews(){
 
 const toggleBtn   = document.getElementById('toggle');
 const explodeBtn  = document.getElementById('explode');
-const infinityBtn = document.getElementById('infinity');
 let mode = '3d';
 let infT = 0;              // seconds since infinity mode was entered
 // Focus-pull ink: once the pull has been held for LINE_FADE_DELAY the gridlines
@@ -1175,18 +1167,15 @@ function stopSpin(){
   spinGoal = Math.round(spinAngle / TAU) * TAU;
 }
 
-// The top view's wheel drives a vertical counterpart of infinity's sheet
-// slide: each layer slides its whole print — fills and gridlines together, a
-// rigid plate — along the depth axis, offset by its own share of one shared
+// The top view's vertical plate slide is the depth-axis counterpart of
+// infinity's sheet slide: each layer slides its whole print — fills and
+// gridlines together, a rigid plate — offset by its own share of one shared
 // displacement, so the three prints shear against each other and the
-// composition keeps re-forming. It mirrors the horizontal sheets in every way:
-// the wheel jogs a velocity that persists after you stop scrolling, a blank
-// click brakes it where it is, and leaving the view whizzes it back to
-// registration. Declared here because the wheel and click handlers and the
-// frame loop all need it.
-const PLATE_SPEED = 2.6;                 // world units / second at a full jog
-const PLATE_WHEEL = 0.006;               // speed added per unit of wheel deltaY
-const PLATE_DEADZONE = 0.5;              // below this, slowing snaps to a stop
+// composition keeps re-forming. The machinery is complete (whiz-home on
+// setMode/enterInfinity, the fixed frame, the picker reading the offsets) but
+// its wheel binding is gone: the default view's scroll now falls into infinity,
+// and the control surface for the vertical movement is still to be chosen.
+// Declared here because the click handler and the frame loop need it.
 let plateY = 0;                          // accumulated vertical offset, world units
 let plateVel = 0;                        // world units / second
 let plateBraking = false;                // coasting smoothly to a stop
@@ -1257,7 +1246,6 @@ function updateToggleIcon(){
 
 function setMode(next){
   document.body.classList.remove('infinity');
-  infinityBtn.classList.remove('is-on');
   uLineReveal.value = 1;      // everything shown outside infinity mode
   uCellReveal.value = 1;
   mode = next;
@@ -1312,7 +1300,6 @@ function reveal(){
   plateBraking = false; plateReturning = false;
   mode = 'top';
   document.body.classList.remove('infinity');
-  infinityBtn.classList.remove('is-on');
   uLineReveal.value = 1;
   uCellReveal.value = 1;
   updateToggleIcon();
@@ -1326,7 +1313,6 @@ function enterInfinity(){
   mode = 'infinity';
   infT = 0;
   document.body.classList.add('infinity');
-  infinityBtn.classList.add('is-on');
   updateToggleIcon();
 
   dst.theta = VIEWTOP.theta; dst.phi = VIEWTOP.phi;
@@ -1344,11 +1330,6 @@ function enterInfinity(){
   uLineReveal.value = 0;
   uCellReveal.value = 0;
   titleRandomize();
-}
-
-function toggleInfinity(){
-  if (mode === 'infinity') setMode('top');
-  else enterInfinity();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1941,29 +1922,21 @@ dom.addEventListener('wheel', e => {
   e.preventDefault();
   if (mode === 'infinity'){
     const max = blurMaxPx();
+    // The flow's downward half: winding down releases the spin and the ink,
+    // and parks at a sharp infinite grid at zero blur. One more downward
+    // scroll then retracts that grid into the framed default view.
+    if (e.deltaY > 0 && blurDst === 0){ setMode('top'); return; }
     blurDst = Math.min(max, Math.max(0, blurDst - e.deltaY * 0.004 * max));
     // Running the pull to the top is the same switch as a title click: hold
-    // the blur, start the turntable, dissolve the ink. Winding back down
-    // releases it again — whichever way the mode was entered.
+    // the blur, start the turntable, dissolve the ink.
     if (blurDst >= max) startSpin();
     else stopSpin();
     return;
   }
-  if (mode === 'top' && !reduceMotion){
-    // the vertical counterpart of infinity's sheet slide: the wheel jogs a
-    // speed the plates keep after release, so the shear carries on at the pace
-    // you set. Each notch adds to the running speed (and reverses it).
-    plateReturning = false;
-    plateBraking = false;
-    const prev = plateVel;                         // jog from the speed it has
-    plateVel = Math.min(PLATE_SPEED, Math.max(-PLATE_SPEED,
-      prev + e.deltaY * PLATE_WHEEL));
-    // Slowing to a stop snaps inside the deadzone, so the wheel can always land
-    // on exactly zero: the speed cap is not a whole number of notches, so equal
-    // up/down scrolls can otherwise leave a permanent crawl. Speeding up never
-    // snaps, so a trackpad's small deltas can still build from rest.
-    if (Math.abs(plateVel) < PLATE_DEADZONE &&
-        Math.abs(plateVel) <= Math.abs(prev)) plateVel = 0;
+  if (mode === 'top'){
+    // scrolling up falls into infinity; the other half of the axis is left
+    // free for the vertical movement control still to be chosen
+    if (e.deltaY < 0) enterInfinity();
     return;
   }
   if (mode === 'split'){
@@ -2120,7 +2093,6 @@ toggleBtn.addEventListener('click', () => {
   setMode((mode === 'top' || mode === 'split') ? '3d' : 'top');
 });
 explodeBtn.addEventListener('click', () => setMode(mode === 'split' ? 'top' : 'split'));
-infinityBtn.addEventListener('click', toggleInfinity);
 document.getElementById('shuffle').addEventListener('click', shuffle);
 
 // The title (and its plate) is the infinity mode turntable only: a click ramps
@@ -2446,6 +2418,17 @@ if (viewParam === 'infinity'){
 } else if (viewParam === 'top' || viewParam === '3d' || viewParam === 'split'){
   setMode(viewParam);
   Object.assign(cur, dst);
+} else {
+  // Start at the far end of the focus axis: infinity, the pull already at max
+  // and the turntable spinning. Scrolling down releases the spin and the ink,
+  // sharpens to the infinite grid and then retracts it into the framed top
+  // view — the flow runs from the defocused whole to the crystallized parts.
+  // The conveyor's camera state is skipped (the swap is synchronous, before
+  // the first paint), so the page never flashes sharp.
+  enterInfinity();
+  Object.assign(cur, dst);
+  blurCur = blurMaxPx();
+  startSpin();
 }
 
 requestAnimationFrame(frame);
