@@ -122,9 +122,32 @@
     position:absolute; z-index:0; top:-14px; bottom:-14px; left:-18px; right:-18px;
     background:var(--ink);
   }
+  /* Mode dots: a transient chain readout at bottom centre. One dot per step of
+     the wheel's hierarchy, all hollow with the same 2px black stroke, the
+     current one filled with its step's colour — ink, the three palette slots,
+     then white. Fades in when a scroll crosses a step and out a beat after. */
+  .mode-dots{
+    position:absolute; left:50%; bottom:clamp(14px,2.6vw,30px);
+    transform:translateX(-50%);
+    display:flex; gap:12px; opacity:0;
+    transition:opacity .55s ease;
+  }
+  .mode-dots.on{ opacity:1 }
+  .mode-dots i{
+    width:10px; height:10px; border-radius:50%;
+    border:2px solid var(--ink);
+    opacity:.7;
+  }
+  .mode-dots i:nth-child(1){ color:var(--ink) }
+  .mode-dots i:nth-child(2){ color:var(--red) }
+  .mode-dots i:nth-child(3){ color:var(--blue) }
+  .mode-dots i:nth-child(4){ color:var(--yellow) }
+  .mode-dots i:nth-child(5){ color:#fff }
+  .mode-dots i.now{ background:currentColor; opacity:1 }
   @media (prefers-reduced-motion:reduce){
     .title-svg, .title-main, .title-alt,
     .title:hover .title-main, .title:hover .title-alt{ transition:none }
+    .mode-dots{ transition:none }
     .veil.blink{ animation:none }
   }
 </style>
@@ -189,6 +212,7 @@
       </svg>
     </h1>
   </div>
+  <div class="mode-dots" id="modeDots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
 </div>
 
 <div class="veil" id="veil" aria-hidden="true"></div>
@@ -1149,6 +1173,7 @@ let slideYV = [0, 0, 0];                 // v velocity, world units / second
 let slideYV0 = [0, 0, 0];                // v velocity at pointer-down
 let slideYBrake = [false, false, false]; // coasting smoothly to a v stop
 let artPlane = -1;                       // grid a split drag grabbed, -1 = none
+let artAxis = null;                      // its locked drag axis, 'x' | 'y' | null
 
 // Iridescent prism state, also declared up here because `applyTitlePalette()`
 // reads `prismCur` and boots before the interaction handlers exist. The prism
@@ -1855,7 +1880,11 @@ const blurMaxPx = () =>
 // clean: an axis only wakes past this many pixels, and the excess is measured
 // from the edge so nothing jumps when it does.
 const DRAG_DEADZONE = 10;
-const pastDeadzone = v => Math.sign(v) * Math.max(0, Math.abs(v) - DRAG_DEADZONE);
+// The split print jog uses a more generous deadzone: each axis feeds its own
+// velocity, and a nearly axis-aligned drag must not leak into the other one.
+// The gesture then locks to its dominant axis for its whole life (pointermove).
+const ART_DEADZONE = 18;
+const pastDeadzone = (v, z = DRAG_DEADZONE) => Math.sign(v) * Math.max(0, Math.abs(v) - z);
 const dom = renderer.domElement;
 
 dom.addEventListener('pointerdown', e => {
@@ -1879,6 +1908,7 @@ dom.addEventListener('pointerdown', e => {
     const pick = pickAt(e.clientX, e.clientY);
     if (!pick.plane) return;
     artPlane = pick.plane.i;
+    artAxis = null;
     dragMoved = false;
     dragX0 = e.clientX; dragY0 = e.clientY;
     slideXV[artPlane] = 0; slideYV[artPlane] = 0;
@@ -1918,19 +1948,23 @@ dom.addEventListener('pointermove', e => {
     return;
   }
   if (artPlane >= 0){
-    if (mode !== 'split'){ artPlane = -1; return; }
+    if (mode !== 'split'){ artPlane = -1; artAxis = null; return; }
     const i = artPlane;
     const dx = e.clientX - dragX0;
     const dy = dragY0 - e.clientY;                   // drag up = print moves in
-    if (Math.abs(dx) > DRAG_DEADZONE || Math.abs(dy) > DRAG_DEADZONE) dragMoved = true;
+    const ax = Math.abs(dx), ay = Math.abs(dy);
+    if (ax > ART_DEADZONE || ay > ART_DEADZONE) dragMoved = true;
     if (dragMoved){
-      // measure each axis past its own deadzone, so a drag meant for one axis
-      // leaves the other exactly where it was, and start each jog from the
-      // velocity the grid already had
-      slideXV[i] = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
-        slideXV0[i] + pastDeadzone(dx) / (0.40 * window.innerWidth) * SHEET_SPEED));
-      slideYV[i] = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
-        slideYV0[i] + pastDeadzone(dy) / (0.40 * window.innerHeight) * SHEET_SPEED));
+      // Lock the gesture to whichever axis woke it, so a nearly axis-aligned
+      // drag cannot leak motion into the other one; the locked axis measures
+      // its excess past the generous deadzone, so nothing jumps when it wakes.
+      if (!artAxis) artAxis = ax >= ay ? 'x' : 'y';
+      if (artAxis === 'x')
+        slideXV[i] = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
+          slideXV0[i] + pastDeadzone(dx, ART_DEADZONE) / (0.40 * window.innerWidth) * SHEET_SPEED));
+      else
+        slideYV[i] = Math.min(SHEET_SPEED, Math.max(-SHEET_SPEED,
+          slideYV0[i] + pastDeadzone(dy, ART_DEADZONE) / (0.40 * window.innerHeight) * SHEET_SPEED));
     }
     return;
   }
@@ -1942,7 +1976,7 @@ dom.addEventListener('pointermove', e => {
   mode = 'custom';
 });
 // releasing keeps the prism where it is and the print jogs at their set pace
-const endDrag = () => { dragging = false; infinityDrag = false; artPlane = -1; };
+const endDrag = () => { dragging = false; infinityDrag = false; artPlane = -1; artAxis = null; };
 dom.addEventListener('pointerup', endDrag);
 dom.addEventListener('pointercancel', endDrag);
 // Split mode's wheel scrubs the hue of the grid under the cursor (see `pl.hue`
@@ -1950,6 +1984,38 @@ dom.addEventListener('pointercancel', endDrag);
 // below the snap return to the exact palette colour.
 const HUE_WHEEL = 0.1;
 const HUE_SNAP = 0.5;
+// The wheel walks one chain in both directions, and a single flick can emit a
+// dozen wheel events (trackpad momentum especially), enough to fall through
+// several modes before the camera catches up. Each chain step buys a beat of
+// silence, so one gesture moves one step; the hue scrub below is continuous
+// control and stays outside the gate.
+const MODE_GATE_MS = 500;
+let modeGateUntil = 0;
+const modeGate = () => performance.now() >= modeGateUntil;
+const closeModeGate = () => { modeGateUntil = performance.now() + MODE_GATE_MS; };
+// Mode dots: the wheel's chain readout, shown subtly at the bottom centre
+// after a scroll crosses a step and gone a beat after the last one. The five
+// steps mirror the hierarchy: held pull (max blur + spin), sharp infinite
+// lattice, infinite runway, framed top view, exploded row.
+const DOTS_HOLD_MS = 1600;
+const modeDots = document.getElementById('modeDots');
+const modeDotEls = [...modeDots.children];
+let modeDotsTimer = 0;
+function modeStepIndex(){
+  if (mode === 'infinity') return spinning ? 0 : 1;
+  if (mode === '3d' || mode === 'custom') return 2;
+  if (mode === 'top') return 3;
+  return 4;                                   // split
+}
+function modeDotsStep(){
+  const now = modeStepIndex();
+  modeDotEls.forEach((d, i) => d.classList.toggle('now', i === now));
+  modeDots.classList.add('on');
+  clearTimeout(modeDotsTimer);
+  modeDotsTimer = setTimeout(() => modeDots.classList.remove('on'), DOTS_HOLD_MS);
+}
+// one chain step: the wheel goes quiet for a beat and the dots come up
+const modeStepped = () => { closeModeGate(); modeDotsStep(); };
 dom.addEventListener('wheel', e => {
   e.preventDefault();
   if (shufflePhase === 'shuffle') return;   // let the in-place shuffle finish
@@ -1960,24 +2026,37 @@ dom.addEventListener('wheel', e => {
   if (mode === 'infinity'){
     // held pull (max blur + spin) <-> sharp infinite lattice, one scroll each
     if (e.deltaY > 0){
+      if (!modeGate()) return;
       if (spinning){ stopSpin(); blurDst = 0; }
       else setMode('3d');                    // down the chain: the runway
+      modeStepped();
       return;
     }
-    if (e.deltaY < 0 && !spinning) startSpin();
+    if (e.deltaY < 0 && !spinning){
+      if (!modeGate()) return;
+      startSpin();
+      modeStepped();
+    }
     return;
   }
   if (mode === 'top'){
     // up the chain is the runway, down is the exploded row
+    if (!modeGate()) return;
     if (e.deltaY < 0) setMode('3d');
     else setMode('split');
+    modeStepped();
     return;
   }
   if (mode === 'split'){
     // up retracts to the framed default; down scrubs the hue of the grid under
     // the cursor, continuously and on top of its palette colour (see
     // planeHex); the paper between the grids is inert — split does not zoom.
-    if (e.deltaY < 0){ setMode('top'); return; }
+    if (e.deltaY < 0){
+      if (!modeGate()) return;
+      setMode('top');
+      modeStepped();
+      return;
+    }
     const pick = pickAt(e.clientX, e.clientY);
     if (pick.plane){
       const pl = pick.plane;
@@ -1992,12 +2071,14 @@ dom.addEventListener('wheel', e => {
   if (mode === '3d' || mode === 'custom'){
     // the runway: up stands the lattice face-on — already tiled, so the reveal
     // must not replay — and down stands the floor up into the framed view
+    if (!modeGate()) return;
     if (e.deltaY < 0){
       enterInfinity();
       settleFill();
     } else {
       setMode('top');
     }
+    modeStepped();
     return;
   }
 }, { passive: false });
